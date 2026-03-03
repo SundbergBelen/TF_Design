@@ -5,6 +5,10 @@
 #SBATCH --mem=28G
 #SBATCH --gres=gpu:0
 #SBATCH --cpus-per-task=10
+#SBATCH --output=out_%j.log
+
+
+export PYTHONUNBUFFERED=1
 
 export CUDA_VISIBLE_DEVICES=0
 # >>> conda initialize >>>
@@ -27,10 +31,11 @@ fi
 # <<< conda initialize <<<
 conda activate newpyrosetta
 
+
 # === Print active environment ===
 echo "Running in environment: $(conda info --envs | grep '*' | awk '{print $1}')"
 
-SCRIPT= "/ifs/scratch/home/bs3281/TF_Project_BS/PIPELINE_BS/Design_and_Score_backrub.py"
+SCRIPT="/ifs/scratch/home/bs3281/TF_Project_BS/PIPELINE_BS/Design_and_Score_backrub.py"
 
-# run design script
-python -u $SCRIPT
+# run design script 
+python -u $SCRIPT 2>&1

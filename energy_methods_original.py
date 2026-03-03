@@ -14,8 +14,18 @@ from pyrosetta.rosetta.protocols.task_operations import RestrictChainToRepacking
 from pyrosetta.rosetta.core.pack.task.operation import RestrictToRepacking
 from pyrosetta.rosetta.protocols.backrub import BackrubMover
 from pyrosetta.rosetta.core.select.movemap import MoveMapFactory
-from pyrosetta.rosetta.protocols.backrub import BackrubMover
 from pyrosetta.rosetta.protocols.simple_filters import ContactMolecularSurfaceFilter
+from pyrosetta.rosetta.core.scoring import CA_rmsd
+import time
+
+
+# print("===== ENV DEBUG =====")
+# print("Python:", sys.executable)
+# print("PyRosetta version:", pyrosetta.__file__)
+# print("Working dir:", os.getcwd())
+# print("OMP_NUM_THREADS:", os.environ.get("OMP_NUM_THREADS"))
+# print("SLURM_JOB_ID:", os.environ.get("SLURM_JOB_ID"))
+# print("=====================")
 
 
 def design_round_for_WT(
@@ -30,7 +40,8 @@ def design_round_for_WT(
 	bias_flag: bool = True,
 	tied_flag: bool = False,
 	chain_res_design_dict: dict = None,
-	temp_dir: str = None,
+	temp_dir_mpnn: str = None,
+	temp_dir_rosetta: str = None,
 ) -> list:
 
 	"""
@@ -50,6 +61,10 @@ def design_round_for_WT(
 
 	@return: list, file paths for all mutated models
 	"""
+	from protein_mpnn_mutator_original import protein_mpnn_designs
+
+	print(f"[INFO.design_round_for_WT] Starting design round...")
+	print(f"[INFO.design_round_for_WT] PDB list: {pdb_list}")
 	make_dir(output_path)
 	pdb_output_path = os.path.join(output_path, "pdbs")
 	make_dir(pdb_output_path)
@@ -66,10 +81,10 @@ def design_round_for_WT(
 
 	# If no PDBs, return empty list early
 	if len(pdb_list) == 0:
-		print("[WARN] No PDBs passed into design_round_for_WT()")
+		print("[WARN.design_round_for_WT] No PDBs passed into design_round_for_WT()")
 		return complete_solution
-
 	for pdb_path in pdb_list:
+		print(f"[INFO.design_round_for_WT] Starting design for: {pdb_path.split('/')[-1]}", flush=True)
 		# Set which residues are to be mutated:
 		# Pseudocode of the following lines of code:
 		# Make residue selector from first residues in HSA (Chain A) to residue 532 (Residue where we make the cut to
@@ -110,17 +125,17 @@ def design_round_for_WT(
 				pose_list.append(str(info.pdb2pose(chain_id, res)))
 				mutable_list[-1].append(str(info.pdb2pose('A', res))) # use the numbering for chain A (mpnn starts at res id 1 for each chain)
 
-		print('mutable list')
+		print(f'[INFO.design_round_for_WT] Mutable list: {mutable_list}')
 		print(mutable_list)
 
-		print("Pose list", pose_list)
+		# print(f'[INFO.design_round_for_WT] Pose list: {pose_list}')
 		pose_list_str = ",".join(pose_list)
-		print(pose_list_str)
+		# print(pose_list_str)
 
 		#residue_list.sort()
 		
 		hsa_res_selector= pyrosetta.rosetta.core.select.residue_selector.ResidueIndexSelector(pose_list_str)
-		print("Res selector:", hsa_res_selector.selection_positions(hsa_pose))
+		print(f'[INFO.design_round_for_WT] Residue selector: {hsa_res_selector.selection_positions(hsa_pose)}')
 		#immutable_residues: pyrosetta.rosetta.core.select.residue_selector.NotResidueSelector = pyrosetta.rosetta.core.select.residue_selector.NotResidueSelector()
 		#immutable_residues.set_residue_selector(hsa_res_selector)
 		#print("immutable: ", immutable_residues.selection_positions(hsa_pose))
@@ -130,11 +145,13 @@ def design_round_for_WT(
 		pdbs_output = os.path.join(pdb_output_path, pdb_path.split("/")[-1][0:-4])
 		make_dir(pdbs_output)
 		if protein_mpnn_flag:
+			print(f"[INFO.design_round_for_WT] Protein MPNN Flag: True", flush=True)
 			models_chain_path = os.path.join(chain_path, pdb_path.split("/")[-1][0:-4])
 			models_seq_path = os.path.join(seq_path, pdb_path.split("/")[-1][0:-4])
 			make_dir(models_chain_path)
 			make_dir(models_seq_path)
 			# Calls function depending on input flags for design methods.
+			print(f"[INFO.design_round_for_WT] Starting Protein MPNN sequence generation: choose {n_pass} best structures from {n_trials} sequences.")
 			passed = protein_mpnn_designs(
 					pdb_path,
 					models_chain_path,
@@ -150,9 +167,10 @@ def design_round_for_WT(
 					n_pass,
 					bias_flag,
 					tied_flag,
-					temp_dir=temp_dir,
+					temp_dir=temp_dir_mpnn,
 				)
 		else:
+			print(f"[INFO.design_round_for_WT] Protein MPNN Flag: False", flush=True)
 			passed = get_designs(pdb_path, hsa_res_selector, pdbs_output, n_trials, n_pass,
 								 thread_num)
 		if len(pdb_list) == 1:
@@ -161,13 +179,13 @@ def design_round_for_WT(
 			for x in passed:
 				complete_solution.append(x)
 		count = count + 1
-		print("energy methods count:", count)
-		print(complete_solution)
+		print(f"energy methods count: {count}")
+		print(f"Complete solution: {complete_solution}")
 	return complete_solution
 
 
 def get_designs(pdb_path: os.path, residue_selector: pyrosetta.rosetta.core.select.residue_selector.ResidueSelector,
-				design_output_folder: os.path, n_trials: int, n_pass: int, thread_num: int = 4) -> list:
+				design_output_folder: os.path, n_trials: int, n_pass: int, thread_num: int, temp_dir_rosetta: str) -> list:
 	"""
 	Generates a defined number of Rosetta design model, only residues in residue selector are allowed to design.
 	It then scores all models using complex_interface/dSASAx100 and n_pass lower scoring models. Returns a
@@ -181,6 +199,7 @@ def get_designs(pdb_path: os.path, residue_selector: pyrosetta.rosetta.core.sele
 	@param thread_num: if multithreading, send thread number
 	@return: list of paths to pass models
 	"""
+	print(f"[INFO.get_designs] Generating Rosetta models and filtering for pdb: {pdb_path}")
 	designs = []
 	file = pdb_path.split("/")[-1][0:-4]
 	working_pose = pyrosetta.pose_from_pdb(pdb_path)
@@ -190,12 +209,18 @@ def get_designs(pdb_path: os.path, residue_selector: pyrosetta.rosetta.core.sele
 		current_design = relax_with_design(working_pose, residue_selector)
 		name_file = os.path.join(design_output_folder, str(file) + "_" + str(i) + "_model.pdb")
 		pdb_name_temp = str(i) + str(thread_num) + ".pdb"
-		make_dir("temp_files")
-		pdb_temp_path = os.path.join("temp_files", pdb_name_temp)
+		
+		import uuid
+
+		unique_id = uuid.uuid4().hex[:6]
+		pdb_temp_path = os.path.join(
+			temp_dir_rosetta,
+			f"{file}_thread{thread_num}_trial{i}_{unique_id}.pdb")
+		
 		current_design.dump_pdb(pdb_temp_path)
 		print(f"[INFO.get_designs] Dumped temp pdb: {pdb_temp_path}")
 		temp_dict = {}
-		new = get_dgDSASA_dict(os.path.join("temp_files", pdb_name_temp), temp_dict)[
+		new = get_dgDSASA_dict(os.path.join("temp_files_rosetta", pdb_name_temp), temp_dict)[
 			'separated_interface/dSASAx100']
 		mut_dict[i] = [current_design, name_file, new]
 	keys = get_keys_with_lowest_scores(mut_dict, n_pass)
@@ -221,6 +246,7 @@ def relax_with_design(Pose: pyrosetta.Pose,
 	@param back_bone_flag:  Restrict relax backbone movements, default is False
 	@return: pyrosetta.Pose
 	"""
+	print(f"[INFO.relax_with_design] Starting relax with design...")
 	score_fxn = pyrosetta.get_fa_scorefxn()
 	working_pose: pyrosetta.rosetta.core.pose.Pose = Pose.clone()
 	design = pyrosetta.rosetta.protocols.relax.FastRelax(standard_repeats=1)
@@ -414,7 +440,8 @@ def relax(Pose: pyrosetta.Pose,
 	relax_mover.apply(working_pose)
 	return working_pose
 
-def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, iterations=100, chain_res_design_dict={}):
+
+def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_backrub=10, n_trials_backrub=1000,chain_res_design_dict={}):
 	print(f"[INFO.perform_chainA_backrub] PERFORMING perform_chainA_backrub IN ENERGY METHODS")
 	#init()
 	make_dir(backrub_output)
@@ -436,57 +463,143 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, iterations=1
 
 		print(f"[INFO.perform_chainA_backrub] Pose list: {pose_list}")
 		pose_list_str = ",".join(pose_list)
-		print(pose_list_str)
 		
 		hsa_res_selector= pyrosetta.rosetta.core.select.residue_selector.ResidueIndexSelector(pose_list_str)
-
-		#working_pose: pyrosetta.Pose = pyrosetta.pose_from_file(pdb_path)
-		#chainA = ChainSelector("A")
-		#print(pyrosetta.rosetta.core.select.get_residues_from_subset(chainA.apply(working_pose)))
-		#chainA_selector = pyrosetta.rosetta.core.select.get_residue_selector_from_subset(chainA.apply(working_pose))
-		## change this to select our residues
 
 		nbr_selector = pyrosetta.rosetta.core.select.residue_selector.NeighborhoodResidueSelector()
 		nbr_selector.set_focus_selector(hsa_res_selector)
 		nbr_selector.set_distance(10.0)
-		
+
 		mmf = pyrosetta.rosetta.core.select.movemap.MoveMapFactory()
+		
 		mmf.add_bb_action(pyrosetta.rosetta.core.select.movemap.move_map_action.mm_enable, hsa_res_selector)
 		mmf.add_bb_action(pyrosetta.rosetta.core.select.movemap.move_map_action.mm_enable, nbr_selector)
 
 		br_mover = pyrosetta.rosetta.protocols.backrub.BackrubMover()
-		br_protocol = pyrosetta.rosetta.protocols.backrub.BackrubProtocol()
+		br_mover.set_movemap_factory(mmf)
 
-		working_pose.update_residue_neighbors()
+		# PRIME THE MOVER
+		print(f"[INFO.perform_chainA_backrub] Priming backrub mover (defaults to all residues)...") # backrub needs to be applied before you add segments...
+		temp_pose = pyrosetta.Pose(working_pose)
+		br_mover.apply(temp_pose)
+
+		print(f"[INFO.perform_chainA_backrub] Clearing segments...")
+		br_mover.clear_segments()
+
+		from pyrosetta.rosetta.core.id import AtomID
+
+		subset = hsa_res_selector.apply(working_pose)
+		resnums = pyrosetta.rosetta.core.select.get_residues_from_subset(subset)
+
+		for i in resnums:
+			if i > 1 and i < working_pose.total_residue():
+				ca1 = working_pose.residue(i-1).atom_index("CA")
+				ca2 = working_pose.residue(i+1).atom_index("CA")
+
+				br_mover.add_segment(
+					AtomID(ca1, i-1),
+					AtomID(ca2, i+1)
+				)
+
+		print(f"[INFO.perform_chainA_backrub] Num segments from neighborhood selector: {br_mover.num_segments()}", flush=True)
+		# br_protocol = pyrosetta.rosetta.protocols.backrub.BackrubProtocol()
+		# print(f"[INFO.perform_chainA_backrub] backrub mover type: {type(br_mover)}")
 
 		scorefxn = pyrosetta.get_fa_scorefxn()
+		score_input = scorefxn(working_pose)
 
-		print(f"[INFO.perform_chainA_backrub] BackrubProtocol iterations {iterations}")
-		for i in range(iterations):
-			br_mover.set_movemap_factory(mmf)
-			br_protocol.set_backrub_mover(br_mover)
-			br_protocol.set_scorefunction(scorefxn)
-			br_protocol.apply(working_pose)
-			print(f"[INFO.perform_chainA_backrub] BackrubProtocol complete")
+		print(f"[INFO.perform_chainA_backrub] Num backrub structures to output: {n_struct_backrub}")
+		for i in range(n_struct_backrub):
 
-		# for i in range(iterations):
-		# 	print(f"[INFO.perform_chainA_backrub] Backrub iteration {i}")
-		# 	br_mover.set_movemap_factory(mmf)
-		# 	# br_mover.apply(working_pose)
+			pose_copy = pyrosetta.Pose(working_pose)
+
+			# # Apply a single backrub move (minimal change)
+			# br_mover.apply(pose_copy)
+			# print(f"[INFO.perform_chainA_backrub] Applied backrub mover")
+
+			# br_protocol = pyrosetta.rosetta.protocols.backrub.BackrubProtocol() # is a JD2 application wrapper
+			# br_protocol.set_backrub_mover(br_mover)
+			# br_protocol.set_scorefunction(scorefxn)
+			# br_protocol.set_options(ntrials=1000)
 			
-		# 	br_protocol.set_backrub_mover(br_mover)
-		# 	br_protocol.set_scorefunction(scorefxn)   
-		# 	br_protocol.apply(working_pose)
-		# 	print(f"[INFO.perform_chainA_backrub] Applied backrub mover")
-		
-			output_path = os.path.join(backrub_output, str(file) + "_" + str(index) + "_br.pdb")
+			# # Restrict pivots
+			# subset = hsa_res_selector.apply(pose_copy)
+			# br_protocol.set_pivots_from_residue_subset(subset)
+			# print(f"[INFO.perform_chainA_backrub] Applying backrub protocol")
+			# br_protocol.apply(pose_copy)
+
+			# --- Prove raw backrub actually moves atoms before MC ---
+			pose0 = pyrosetta.Pose(pose_copy)
+
+			for _ in range(5):
+				br_mover.apply(pose_copy)
+
+			first_rmsd = CA_rmsd(pose0, pose_copy)
+			# print(f"[INFO.perform_chainA_backrub] first rmsd {first_rmsd}")
+
+			if first_rmsd < 5e-3:
+				raise RuntimeError(
+					f"[INFO.perform_chainA_backrub] Backrub proposals are effectively zero "
+					f"(ΔRMSD after 5 raw moves = {first_rmsd:.4f} Å). "
+					"BB DOFs likely blocked or pivots invalid.", flush=True
+				)
+
+			# reset pose before MC
+			pose_copy.assign(pose0)
+
+			mc = pyrosetta.rosetta.protocols.moves.MonteCarlo(
+				pose_copy,
+				scorefxn,
+				1.5  # temperature
+			)
+
+			accepted = 0
+			start = time.time()
+			
+			print(f"[INFO.perform_chainA_backrub] Running {n_trials_backrub} MC trials...", flush=True)
+			print_interval = max(1, n_trials_backrub // 20)
+
+			for step in range(n_trials_backrub):
+				br_mover.apply(pose_copy)
+				if mc.boltzmann(pose_copy):
+					accepted += 1
+
+				if step % print_interval == 0 or step == n_trials_backrub - 1:
+					print(
+						f"[INFO.perform_chainA_backrub] "
+						f"MC step {step}/{n_trials_backrub} "
+						f"({100*step/n_trials_backrub:.1f}%)  "
+						f"Accepted: {accepted}",
+						flush=True,
+					)
+			end = time.time()
+			print(f"[INFO.perform_chainA_backrub] Elapsed time: {end - start:.3f} s")
+
+			final_rmsd = CA_rmsd(pose0, pose_copy)
+			acc_rate = accepted / n_trials_backrub
+
+			print(
+				f"[INFO.perform_chainA_backrub] accepted={accepted}/{n_trials_backrub} ({acc_rate*100:4.1f}%)  "
+				f"ΔRMSD={final_rmsd:.3f} Å  "
+				f"MC loop time: {end - start:.2f}s",
+				flush=True
+			)
+			delta_score = scorefxn(pose_copy) - score_input
+			print(f"[INFO.perform_chainA_backrub] delta score (backrub structure {i}) = {delta_score}")
+
+			output_path = os.path.join(
+				backrub_output,
+				str(file) + "_" + str(index) + "_br.pdb"
+			)
+
 			final.append(output_path)
-			
-			working_pose.dump_pdb(output_path)
-			print(f"[INFO.perform_chainA_backrub] Dump pdb to output path: {output_path}")
+			pose_copy.dump_pdb(output_path)
+			print(f"[INFO.perform_chainA_backrub] Dump pdb to output path: {output_path}", flush=True)
 			index += 1
 	
 	return final
+
+
 
 
 def mut_sequence(new_sequence: str, pose: pyrosetta.rosetta.core.pose.Pose, chain_number: int
@@ -502,6 +615,7 @@ def mut_sequence(new_sequence: str, pose: pyrosetta.rosetta.core.pose.Pose, chai
 	@param design_flag: is this relaxing only or also designing? if true it will design
 	@return: Mutated pose
 	"""
+	print(f"[INFO.mut_sequence] Mutating sequence into pose...")
 	working_pose: pyrosetta.rosetta.core.pose.Pose = pose.clone()
 	'''native_seq_desired_chain = pose.chain_sequence(chain_number)
 	first_residue = working_pose.chain_begin(chain_number)

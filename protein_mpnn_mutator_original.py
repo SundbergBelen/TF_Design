@@ -149,7 +149,9 @@ def protein_mpnn_designs(
     @return: list of paths to passed models.
     """
 
+
     file = path_to_pdb.split("/")[-1][0:-4]
+    print(f"[INFO.protein_mpnn_designs] Starting Protein MPNN design for file: {file}")
 
     mutable_positions = ", ".join([" ".join(m) for m in mutable_list])
 
@@ -188,15 +190,23 @@ def protein_mpnn_designs(
                                                design_flag)
         
         if temp_dir is None:
-            raise ValueError("temp_dir must be passed into protein_mpnn_designs()")
+            raise ValueError("[WARN.protein_mpnn_designs] temp_dir must be passed into protein_mpnn_designs()")
 
         os.makedirs(temp_dir, exist_ok=True)
 
         # Construct a unique filename for each sequence/model
         base = os.path.splitext(os.path.basename(path_to_pdb))[0]
-        pdb_name_temp = f"{base}_thread{thread_num}_idx{index}.pdb"
+        
+        import uuid
+        unique_id = uuid.uuid4().hex[:8]
+        
+        import uuid
 
-        pdb_abs_path = os.path.join(temp_dir, pdb_name_temp)
+        unique_id = uuid.uuid4().hex[:6]
+        pdb_abs_path = os.path.join(
+            temp_dir,
+            f"{base}_thread{thread_num}_idx{index}_{unique_id}.pdb"
+        )
 
         solution.dump_pdb(pdb_abs_path)
 
@@ -206,16 +216,19 @@ def protein_mpnn_designs(
             #'separated_interface/dSASAx100']
 
         #NEW CODE
+        print(f"[INFO.protein_mpnn_designs] Filtering based on separated_interface/dSASAx100")
         new = energy_methods_original.get_dgDSASA_dict(pdb_abs_path, current_dict)[
         'separated_interface/dSASAx100']
         
         mut_dict[index] = [solution, name_file, new]
-        print("This is mut_dict[index]:", mut_dict[index])
+        print(f"[INFO.protein_mpnn_designs] This is mut_dict[index]: {mut_dict[index]}")
+
     keys = get_keys_with_lowest_scores(mut_dict, n_pass)
+
     for i in keys:
         mut_dict[i][0].dump_pdb(mut_dict[i][1])
         solutions.append(mut_dict[i][1])
-    print("mut_dict[i][1]:", mut_dict[i][1])
-    print("solutions:", solutions )
-    print("thread_num", thread_num)
+    print(f"[INFO.protein_mpnn_designs] mut_dict[i][1]: {mut_dict[i][1]}")
+    print(f"[INFO.protein_mpnn_designs] solutions: {solutions}")
+    print(f"[INFO.protein_mpnn_designs] thread_num: {thread_num}")
     return solutions
