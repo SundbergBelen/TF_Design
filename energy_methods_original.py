@@ -470,6 +470,11 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 		nbr_selector.set_focus_selector(hsa_res_selector)
 		nbr_selector.set_distance(10.0)
 
+		nbr_subset = nbr_selector.apply(working_pose)
+		nbr_resnums = pyrosetta.rosetta.core.select.get_residues_from_subset(nbr_subset)
+
+		print("[INFO.perform_chainA_backrub] Neighborhood residues:", nbr_resnums)
+
 		mmf = pyrosetta.rosetta.core.select.movemap.MoveMapFactory()
 		
 		mmf.add_bb_action(pyrosetta.rosetta.core.select.movemap.move_map_action.mm_enable, hsa_res_selector)
@@ -490,6 +495,7 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 
 		subset = hsa_res_selector.apply(working_pose)
 		resnums = pyrosetta.rosetta.core.select.get_residues_from_subset(subset)
+		print("[INFO.perform_chainA_backrub] Selected residues (pose numbering):", resnums)
 
 		for i in resnums:
 			if i > 1 and i < working_pose.total_residue():
@@ -509,24 +515,13 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 		score_input = scorefxn(working_pose)
 
 		print(f"[INFO.perform_chainA_backrub] Num backrub structures to output: {n_struct_backrub}")
+		lowest_score = float("inf")
+		lowest_pose = None
+		last_pose = None
+
 		for i in range(n_struct_backrub):
 
 			pose_copy = pyrosetta.Pose(working_pose)
-
-			# # Apply a single backrub move (minimal change)
-			# br_mover.apply(pose_copy)
-			# print(f"[INFO.perform_chainA_backrub] Applied backrub mover")
-
-			# br_protocol = pyrosetta.rosetta.protocols.backrub.BackrubProtocol() # is a JD2 application wrapper
-			# br_protocol.set_backrub_mover(br_mover)
-			# br_protocol.set_scorefunction(scorefxn)
-			# br_protocol.set_options(ntrials=1000)
-			
-			# # Restrict pivots
-			# subset = hsa_res_selector.apply(pose_copy)
-			# br_protocol.set_pivots_from_residue_subset(subset)
-			# print(f"[INFO.perform_chainA_backrub] Applying backrub protocol")
-			# br_protocol.apply(pose_copy)
 
 			# --- Prove raw backrub actually moves atoms before MC ---
 			pose0 = pyrosetta.Pose(pose_copy)
@@ -535,13 +530,12 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 				br_mover.apply(pose_copy)
 
 			first_rmsd = CA_rmsd(pose0, pose_copy)
-			# print(f"[INFO.perform_chainA_backrub] first rmsd {first_rmsd}")
 
 			if first_rmsd < 5e-3:
 				raise RuntimeError(
 					f"[INFO.perform_chainA_backrub] Backrub proposals are effectively zero "
 					f"(ΔRMSD after 5 raw moves = {first_rmsd:.4f} Å). "
-					"BB DOFs likely blocked or pivots invalid.", flush=True
+					"BB DOFs likely blocked or pivots invalid."
 				)
 
 			# reset pose before MC
@@ -550,17 +544,20 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 			mc = pyrosetta.rosetta.protocols.moves.MonteCarlo(
 				pose_copy,
 				scorefxn,
-				1.5  # temperature
+				1.5
 			)
 
 			accepted = 0
 			start = time.time()
-			
+
 			print(f"[INFO.perform_chainA_backrub] Running {n_trials_backrub} MC trials...", flush=True)
+
 			print_interval = max(1, n_trials_backrub // 20)
 
 			for step in range(n_trials_backrub):
+
 				br_mover.apply(pose_copy)
+
 				if mc.boltzmann(pose_copy):
 					accepted += 1
 
@@ -572,20 +569,28 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 						f"Accepted: {accepted}",
 						flush=True,
 					)
+
 			end = time.time()
-			print(f"[INFO.perform_chainA_backrub] Elapsed time: {end - start:.3f} s")
 
 			final_rmsd = CA_rmsd(pose0, pose_copy)
 			acc_rate = accepted / n_trials_backrub
 
+			print(f"[INFO.perform_chainA_backrub] Elapsed time: {end - start:.3f} s")
+
 			print(
-				f"[INFO.perform_chainA_backrub] accepted={accepted}/{n_trials_backrub} ({acc_rate*100:4.1f}%)  "
+				f"[INFO.perform_chainA_backrub] accepted={accepted}/{n_trials_backrub} "
+				f"({acc_rate*100:4.1f}%)  "
 				f"ΔRMSD={final_rmsd:.3f} Å  "
 				f"MC loop time: {end - start:.2f}s",
 				flush=True
 			)
-			delta_score = scorefxn(pose_copy) - score_input
-			print(f"[INFO.perform_chainA_backrub] delta score (backrub structure {i}) = {delta_score}")
+
+			current_score = scorefxn(pose_copy)
+			delta_score = current_score - score_input
+
+			print(
+				f"[INFO.perform_chainA_backrub] delta score (backrub structure {i}) = {delta_score}"
+			)
 
 			output_path = os.path.join(
 				backrub_output,
@@ -594,12 +599,47 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 
 			final.append(output_path)
 			pose_copy.dump_pdb(output_path)
-			print(f"[INFO.perform_chainA_backrub] Dump pdb to output path: {output_path}", flush=True)
+
+			print(
+				f"[INFO.perform_chainA_backrub] Dump pdb to output path: {output_path}",
+				flush=True
+			)
+
+			# track lowest energy pose
+			if current_score < lowest_score:
+				lowest_score = current_score
+				lowest_pose = pose_copy.clone()
+
+			last_pose = pose_copy.clone()
+
 			index += 1
-	
+
+		# --------------------------------------------------
+		# After loop: dump lowest + last structures
+		# --------------------------------------------------
+
+		lowest_path = os.path.join(backrub_output, str(file) + "_lowest_br.pdb")
+		last_path = os.path.join(backrub_output, str(file) + "_last_br.pdb")
+
+		lowest_pose.dump_pdb(lowest_path)
+		last_pose.dump_pdb(last_path)
+
+		lowest_rmsd = CA_rmsd(working_pose, lowest_pose)
+		last_rmsd = CA_rmsd(working_pose, last_pose)
+
+		print(
+			f"[INFO.perform_chainA_backrub] Lowest energy: {lowest_score:.3f} "
+			f"RMSD={lowest_rmsd:.3f} Å"
+		)
+
+		print(
+			f"[INFO.perform_chainA_backrub] Last structure energy: {scorefxn(last_pose):.3f} "
+			f"RMSD={last_rmsd:.3f} Å"
+		)
+
+		print(f"[INFO.perform_chainA_backrub] Dump lowest pdb: {lowest_path}")
+		print(f"[INFO.perform_chainA_backrub] Dump last pdb: {last_path}")
 	return final
-
-
 
 
 def mut_sequence(new_sequence: str, pose: pyrosetta.rosetta.core.pose.Pose, chain_number: int
