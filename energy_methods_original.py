@@ -495,6 +495,9 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 
 		subset = hsa_res_selector.apply(working_pose)
 		resnums = pyrosetta.rosetta.core.select.get_residues_from_subset(subset)
+		start_resnum = min(resnums)
+		end_resnum = max(resnums)
+
 		print("[INFO.perform_chainA_backrub] Selected residues (pose numbering):", resnums)
 
 		for i in resnums:
@@ -519,6 +522,16 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 		lowest_pose = None
 		last_pose = None
 
+		score_rows = []
+
+		input_score = scorefxn(working_pose)
+
+		score_rows.append({
+			"structure_type": "input",
+			"trajectory": -1,
+			"pdb_path": str(file),
+			"score": input_score})
+
 		for i in range(n_struct_backrub):
 
 			pose_copy = pyrosetta.Pose(working_pose)
@@ -529,7 +542,7 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 			for _ in range(5):
 				br_mover.apply(pose_copy)
 
-			first_rmsd = CA_rmsd(pose0, pose_copy)
+			first_rmsd = CA_rmsd(pose0, pose_copy, start_resnum, end_resnum) #rn just for one helix. 
 
 			if first_rmsd < 5e-3:
 				raise RuntimeError(
@@ -554,12 +567,22 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 
 			print_interval = max(1, n_trials_backrub // 20)
 
+			# --- reset per-trajectory tracking ---
+			lowest_score = scorefxn(pose_copy)
+			lowest_pose = pose_copy.clone()
+
 			for step in range(n_trials_backrub):
 
 				br_mover.apply(pose_copy)
 
 				if mc.boltzmann(pose_copy):
 					accepted += 1
+
+				current_score = scorefxn(pose_copy)
+
+				if current_score < lowest_score:
+					lowest_score = current_score
+					lowest_pose = pose_copy.clone()
 
 				if step % print_interval == 0 or step == n_trials_backrub - 1:
 					print(
@@ -572,7 +595,7 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 
 			end = time.time()
 
-			final_rmsd = CA_rmsd(pose0, pose_copy)
+			final_rmsd = CA_rmsd(pose0, pose_copy, start_resnum, end_resnum)
 			acc_rate = accepted / n_trials_backrub
 
 			print(f"[INFO.perform_chainA_backrub] Elapsed time: {end - start:.3f} s")
@@ -580,66 +603,86 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 			print(
 				f"[INFO.perform_chainA_backrub] accepted={accepted}/{n_trials_backrub} "
 				f"({acc_rate*100:4.1f}%)  "
-				f"ΔRMSD={final_rmsd:.3f} Å  "
+				f"ΔRMSD CA={final_rmsd:.3f} Å  "
 				f"MC loop time: {end - start:.2f}s",
-				flush=True
-			)
-
-			current_score = scorefxn(pose_copy)
-			delta_score = current_score - score_input
-
-			print(
-				f"[INFO.perform_chainA_backrub] delta score (backrub structure {i}) = {delta_score}"
-			)
-
-			output_path = os.path.join(
-				backrub_output,
-				str(file) + "_" + str(index) + "_br.pdb"
-			)
-
-			final.append(output_path)
-			pose_copy.dump_pdb(output_path)
-
-			print(
-				f"[INFO.perform_chainA_backrub] Dump pdb to output path: {output_path}",
-				flush=True
-			)
-
-			# track lowest energy pose
-			if current_score < lowest_score:
-				lowest_score = current_score
-				lowest_pose = pose_copy.clone()
+				flush=True)
 
 			last_pose = pose_copy.clone()
+			last_score = scorefxn(last_pose)
+
+			print(f"[INFO.perform_chainA_backrub] delta score (backrub structure {i}) = {last_score - score_input}")
+
+			# --------------------------------------------------
+			# Output paths
+			# --------------------------------------------------
+
+			last_path = os.path.join(
+				backrub_output,
+				f"{file}_{index}_br.pdb")
+
+			lowest_path = os.path.join(
+				backrub_output,
+				f"{file}_{index}_lowest_br.pdb")
+
+			last_pose.dump_pdb(last_path) #only dumping last.
+			# lowest_pose.dump_pdb(lowest_path)
+			final.append(last_path)
+
+			print(f"[INFO.perform_chainA_backrub] Dump last pdb: {last_path}", flush=True)
+			print(f"[INFO.perform_chainA_backrub] Dump lowest pdb: {lowest_path}", flush=True)
+
+			lowest_rmsd = CA_rmsd(pose0, lowest_pose)
+			last_rmsd = CA_rmsd(pose0, last_pose)
+
+			print(
+				f"[INFO.perform_chainA_backrub] "
+				f"lowest energy={lowest_score:.3f} RMSD={lowest_rmsd:.3f} Å | "
+				f"last energy={last_score:.3f} RMSD={last_rmsd:.3f} Å"
+			)
+
+			score_rows.append({
+				"structure_type": "lowest",
+				"trajectory": i,
+				"pdb_path": lowest_path,
+				"score": lowest_score,
+				"rmsd": lowest_rmsd
+			})
+
+			score_rows.append({
+				"structure_type": "last",
+				"trajectory": i,
+				"pdb_path": last_path,
+				"score": last_score,
+				"rmsd": last_rmsd
+			})
 
 			index += 1
 
-		# --------------------------------------------------
-		# After loop: dump lowest + last structures
-		# --------------------------------------------------
+		csv_path = os.path.join(backrub_output, f"{file}_backrub_scores.csv")
+		write_backrub_score_csv(csv_path, score_rows)
 
-		lowest_path = os.path.join(backrub_output, str(file) + "_lowest_br.pdb")
-		last_path = os.path.join(backrub_output, str(file) + "_last_br.pdb")
-
-		lowest_pose.dump_pdb(lowest_path)
-		last_pose.dump_pdb(last_path)
-
-		lowest_rmsd = CA_rmsd(working_pose, lowest_pose)
-		last_rmsd = CA_rmsd(working_pose, last_pose)
-
-		print(
-			f"[INFO.perform_chainA_backrub] Lowest energy: {lowest_score:.3f} "
-			f"RMSD={lowest_rmsd:.3f} Å"
-		)
-
-		print(
-			f"[INFO.perform_chainA_backrub] Last structure energy: {scorefxn(last_pose):.3f} "
-			f"RMSD={last_rmsd:.3f} Å"
-		)
-
-		print(f"[INFO.perform_chainA_backrub] Dump lowest pdb: {lowest_path}")
-		print(f"[INFO.perform_chainA_backrub] Dump last pdb: {last_path}")
 	return final
+
+
+
+def write_backrub_score_csv(csv_path, rows):
+    """
+    Write score summary for backrub structures.
+    
+    rows = list of dicts with keys:
+        structure_type
+        trajectory
+        pdb_path
+        score
+    """
+    fieldnames = ["structure_type", "trajectory", "pdb_path", "score", "rmsd"]
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"[INFO] Wrote score summary CSV: {csv_path}")
 
 
 def mut_sequence(new_sequence: str, pose: pyrosetta.rosetta.core.pose.Pose, chain_number: int

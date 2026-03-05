@@ -36,8 +36,8 @@ input_folder = "/ifs/share/TF_Project/Design/TF_project_design_step/GalS/Design_
 directory_name = "/ifs/scratch/home/bs3281/TF_Project_BS/Test"
 run_name = "Output_backrub_1k_test_low_best"
 residues_to_mutate = [275, 276, 277, 278, 279, 280, 281]
-n_struct_backrub=5
-n_trials_backrub=1000
+n_struct_backrub=2
+n_trials_backrub=200
 
 # Pipeline behavior flags
 USE_ProteinMPNN   = True
@@ -145,6 +145,7 @@ def execute_pipeline(
 			chain_res_design_dict=chain_res_design_dict,
 		)
 		pre_step_1 = backrub_designs
+		print(f"[INFO.execute_pipeline] backrub files: {pre_step_1}", flush=True)
 
 	# -------- Step 1 --------
 	print(f"\n[INFO.execute_pipeline] Starting Design Round 1", flush=True)
