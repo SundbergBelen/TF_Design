@@ -121,16 +121,32 @@ def execute_pipeline(
 	log(f"pdb_paths: {pdb_paths}")
 
 	if cfg["use_backrub"]:
-		log("USE BACKRUB TRUE")
+		if not cfg["use_relaxed_input"]:
+			log("Input not relaxed and backrub enabled -> relaxing structure before backrub")
+			pre_backrub_paths = []
+			for pdb in pdb_paths:
+				pose = pyrosetta.pose_from_pdb(pdb)
+				relaxed_pose = energy_methods_original.pre_relax_input(pose)
+				relaxed_path = os.path.join(backrub_path, f"{Path(pdb).stem}_pre_backrub_relaxed.pdb")
+				relaxed_pose.dump_pdb(relaxed_path)
+				pre_backrub_paths.append(relaxed_path)
+			backrub_input_paths = pre_backrub_paths
+		else:
+			log("Input already relaxed and backrub enabled -> using input directly for backrub")
+			backrub_input_paths = pdb_paths
+
 		backrub_designs = energy_methods_original.perform_chainA_backrub(
-			pdb_paths,
+			backrub_input_paths,
 			backrub_path,
 			n_struct_backrub=cfg["n_struct_backrub"],
 			n_trials_backrub=cfg["n_trials_backrub"],
 			chain_res_design_dict=chain_res_design_dict,
 		)
 		pre_step_1 = backrub_designs
-		log(f"backrub files: {pre_step_1}")
+		mpnn_inputs_are_relaxed = True
+	else:
+		pre_step_1 = pdb_paths
+		mpnn_inputs_are_relaxed = cfg["use_relaxed_input"]
 
 	print("\n")
 	log("Starting Design Round 1")
@@ -139,7 +155,7 @@ def execute_pipeline(
 		protein_mpnn_1_path,
 		cfg["use_protein_mpnn"],
 		cfg["use_rosetta_design"],
-		cfg["use_relaxed_input"],
+		mpnn_inputs_are_relaxed,
 		n_thread,
 		cfg["n_trials"],
 		cfg["n_pass"],
@@ -172,7 +188,7 @@ def execute_pipeline(
 		protein_mpnn_2_path,
 		cfg["use_protein_mpnn"],
 		cfg["use_rosetta_design"],
-		True,
+		mpnn_inputs_are_relaxed,
 		n_thread,
 		cfg["n_trials"],
 		cfg["n_pass"],

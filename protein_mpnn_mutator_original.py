@@ -175,10 +175,14 @@ def protein_mpnn_designs(
     emo.hbond_options().decompose_bb_hb_into_pair_energies(True)
     score_fxn.set_energy_method_options(emo)
     score_fxn.score(pose)
+
     if not relaxed:
+        log(f"Inputs for mpnn design are not relaxed yet...")
         working_pose: pyrosetta.Pose = energy_methods_original.relax(pose, residue_selector)
     else:
+        log(f"Inputs for mpnn design are already relaxed...")
         working_pose: pyrosetta.Pose = pose.clone()
+
     current_dict = {'file': path_to_pdb.split('/')[-1][0:-4]}
     solutions: list = []
     mut_dict = {}
@@ -198,7 +202,7 @@ def protein_mpnn_designs(
                                                design_flag)
         
         if temp_dir is None:
-            raise ValueError("[WARN.protein_mpnn_designs] temp_dir must be passed into protein_mpnn_designs()")
+            raise ValueError("WARNING temp_dir must be passed into protein_mpnn_designs()")
 
         os.makedirs(temp_dir, exist_ok=True)
 

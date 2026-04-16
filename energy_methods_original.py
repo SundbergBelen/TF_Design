@@ -571,14 +571,14 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 
 			log(
 				f"accepted={accepted}/{n_trials_backrub} "
-				f"({acc_rate*100:4.1f}%)  "
+				f"(acceptance rate={acc_rate*100:4.1f}%)  "
 				f"ΔRMSD CA={final_rmsd:.3f} Å  "
 				f"MC loop time: {end - start:.2f}s",)
 
 			last_pose = pose_copy.clone()
 			last_score = scorefxn(last_pose)
 
-			log(f"delta score (last_score - score_input) (backrub structure {i}) = {last_score - score_input}")
+			
 
 			# --------------------------------------------------
 			# Output paths
@@ -606,6 +606,9 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 				f"lowest energy={lowest_score:.3f} RMSD={lowest_rmsd:.3f} Å | "
 				f"last energy={last_score:.3f} RMSD={last_rmsd:.3f} Å"
 			)
+			log(f"delta score (last_score - score_input) (backrub structure {i}) = {last_score - score_input}")
+
+			log(f"Using last pdb not lowest energy pdb...")
 
 			score_rows.append({
 				"structure_type": "lowest",
@@ -630,26 +633,53 @@ def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_bac
 
 	return final
 
+def pre_relax_input(pose: pyrosetta.Pose, iterations: int = 5, constraints: bool = True):
+
+	log(f"Using fast relax with {iterations} iterations. Side chain and start coord constraints are {constraints}")
+
+	score_fxn = pyrosetta.get_fa_scorefxn()
+
+	if constraints:
+		score_fxn.set_weight(pyrosetta.rosetta.core.scoring.coordinate_constraint, 1.0)
+
+	score_before = score_fxn(pose)
+	log(f"Score before pre-relax: {score_before:.3f}")
+
+	relax = pyrosetta.rosetta.protocols.relax.FastRelax(score_fxn, iterations)
+
+	if constraints:
+		relax.constrain_relax_to_start_coords(True)
+		relax.coord_constrain_sidechains(True)
+
+	relax.apply(pose)
+
+	score_after = score_fxn(pose)
+	score_delta = score_after - score_before
+
+	log(f"Score after pre-relax: {score_after:.3f}")
+	log(f"Delta score: {score_delta:.3f}")
+
+	return pose
 
 
 def write_backrub_score_csv(csv_path, rows):
-    """
-    Write score summary for backrub structures.
-    
-    rows = list of dicts with keys:
-        structure_type
-        trajectory
-        pdb_path
-        score
-    """
-    fieldnames = ["structure_type", "trajectory", "pdb_path", "score", "rmsd"]
+	"""
+	Write score summary for backrub structures.
+	
+	rows = list of dicts with keys:
+		structure_type
+		trajectory
+		pdb_path
+		score
+	"""
+	fieldnames = ["structure_type", "trajectory", "pdb_path", "score", "rmsd"]
 
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+	with open(csv_path, "w", newline="") as f:
+		writer = csv.DictWriter(f, fieldnames=fieldnames)
+		writer.writeheader()
+		writer.writerows(rows)
 
-    log(f"Wrote score summary CSV: {csv_path}")
+	log(f"Wrote score summary CSV: {csv_path}")
 
 
 def mut_sequence(new_sequence: str, pose: pyrosetta.rosetta.core.pose.Pose, chain_number: int
