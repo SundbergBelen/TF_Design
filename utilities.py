@@ -1,6 +1,27 @@
 import os
 import pyrosetta
+import inspect
 
+DEBUG = False
+
+def set_debug(value: bool):
+	global DEBUG
+	DEBUG = value
+
+def dprint(*args, **kwargs):
+	if DEBUG:
+		frame = inspect.currentframe().f_back
+		func_name = frame.f_code.co_name
+		print(f"[DEBUG][{func_name}]", *args, **kwargs)
+
+def log(msg, level="INFO", thread=None, indent=0):
+	frame = inspect.currentframe().f_back
+	func_name = frame.f_code.co_name
+
+	thread_str = f"[ THREAD {thread} ]" if thread is not None else ""
+	indent_str = "    " * indent  # 4 spaces per level
+
+	print(f"[{level}]{thread_str}[{func_name}] {indent_str}{msg}", flush=True)
 
 def move_files(start_folder: os.path, destination_folder: os.path) -> None:
     """
@@ -57,7 +78,7 @@ def make_dir(dir_path: os.path) -> None:
     try:
         os.makedirs(dir_path)
     except:
-        print(f"[INFO] Directory {dir_path} already exists")
+        log(f"Directory {dir_path} already exists")
 
 
 def get_keys_with_lowest_scores(scores_dict, num):

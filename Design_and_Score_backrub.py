@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 import sys
 class StdoutTagger:
-    def write(self, msg):
-        if msg.strip():
-            for line in msg.splitlines(True):
-                sys.__stdout__.write(f"[PYTHON STDOUT] {line}")
-    def flush(self):
-        sys.__stdout__.flush()
+	def write(self, msg):
+		if msg.strip():
+			for line in msg.splitlines(True):
+				sys.__stdout__.write(f"[PYTHON STDOUT] {line}")
+	def flush(self):
+		sys.__stdout__.flush()
 
 class StderrTagger:
 	def write(self, msg):
@@ -26,146 +26,131 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 import tempfile
+import yaml
 
+def load_config(config_path):
+	with open(config_path, "r") as f:
+		config = yaml.safe_load(f)
 
-# ============================================================
-# === USER SETTINGS — MODIFY THESE ONLY ======================
-# ============================================================
+	inputs = config.get("inputs", {})
+	options = config.get("options", {})
+	environment = config.get("environment", {})
 
-input_folder = "/ifs/share/TF_Project/Design/TF_project_design_step/GalS/Design_input"
-directory_name = "/ifs/scratch/home/bs3281/TF_Project_BS/Test"
-run_name = "Output_backrub_1k_test_low_best"
-residues_to_mutate = [275, 276, 277, 278, 279, 280, 281]
-n_struct_backrub=2
-n_trials_backrub=200
+	cfg = {
+		"input_folder": inputs["input_folder"],
+		"directory_name": inputs["directory_name"],
+		"run_name": inputs["run_name"],
+		"residues_to_mutate": inputs["residues_to_mutate"],
+		"n_struct_backrub": options.get("n_struct_backrub", 2),
+		"n_trials_backrub": options.get("n_trials_backrub", 200),
+		"use_protein_mpnn": options.get("use_protein_mpnn", True),
+		"use_rosetta_design": options.get("use_rosetta_design", False),
+		"use_relaxed_input": options.get("use_relaxed_input", True), #are the inputs already relaxed?
+		"use_backrub": options.get("use_backrub", True),
+		"bias_flag": options.get("bias_flag", False),
+		"tied_flag": options.get("tied_flag", True),
+		"n_trials": options.get("n_trials", 3),
+		"n_pass": options.get("n_pass", 2),
+		"num_threads": options.get("num_threads", 1),
+		"protein_mpnn_repo": Path(environment["protein_mpnn_repo"]),
+	}
 
-# Pipeline behavior flags
-USE_ProteinMPNN   = True
-USE_RosettaDesign = False
-USE_relaxed_input = True # are the inputs already relaxed? 
-USE_backrub       = True
-BIAS_FLAG         = False
-TIED_FLAG         = True
+	return cfg
 
-# Design parameters
-N_TRIALS = 3
-N_PASS   = 2
+def setup_imports(cfg):
+	pipeline_dir = Path(__file__).resolve().parent
+	protein_mpnn_repo = cfg["protein_mpnn_repo"]
+	protein_mpnn_parent = protein_mpnn_repo.parent
 
-# Parallelism
-NUM_THREADS = 1 #If set to more than 1 then the full log is not printed.
+	if str(pipeline_dir) not in sys.path:
+		sys.path.insert(0, str(pipeline_dir))
 
+	if str(protein_mpnn_parent) not in sys.path:
+		sys.path.insert(0, str(protein_mpnn_parent))
 
-# ============================================================
-# === PATHS SETUP ============================================
-# ============================================================
+	return protein_mpnn_parent
 
-protein_mpnn_repo = Path("/ifs/scratch/home/bs3281/Parrots_BS/ProteinMPNN")
-protein_mpnn_parent = protein_mpnn_repo.parent
-
-if str(protein_mpnn_parent) not in sys.path:
-	sys.path.insert(0, str(protein_mpnn_parent))
-
-from utilities import *
-import energy_methods_original
-from ProteinMPNN import protein_mpnn_run
-
-
-# ============================================================
-# === MAIN PIPELINE FUNCTION =================================
-# ============================================================
 def execute_pipeline(
 	pdb_paths,
 	protein_mpnn_1_path,
 	protein_mpnn_2_path,
 	backrub_path,
-	temp_dir_mpnn,
-	temp_dir_rosetta,
 	n_thread,
 	run_dir,
+	cfg,
+	csv_step1,
+	csv_step2,
 ):
-	"""Execute PARROTS pipeline for a given list of PDBs using global user settings."""
-	
-	# log_file = os.path.join(run_dir, f"log_files/worker_{n_thread}.log")
-	# sys.stdout = open(log_file, "w")
-	# sys.stderr = sys.stdout
-
-	print(f"Worker {n_thread} starting", flush=True)
-
+	from utilities import log
+	import energy_methods_original
 	import pyrosetta
+
+	log(f"Worker {n_thread} starting")
+
 	pyrosetta.init(
 		extra_options="-relax:default_repeats 1 -ignore_zero_occupancy false -multithreading:total_threads 1 -constant_seed false"
 	)
-	
-	print(f"[PID {os.getpid()}] PyRosetta initialized", flush=True)
 
-	import tempfile
-	from pathlib import Path
+	log(f"[PID {os.getpid()}] PyRosetta initialized")
 
-	# Create unique temp root for this worker
 	temp_root = Path(run_dir) / "temp_files"
 	temp_root.mkdir(exist_ok=True)
 
-	worker_temp_root = Path(
-		tempfile.mkdtemp(prefix=f"worker{n_thread}_", dir=temp_root)
-	)
-
+	worker_temp_root = Path(tempfile.mkdtemp(prefix=f"worker{n_thread}_", dir=temp_root))
 	temp_dir_mpnn = worker_temp_root / "mpnn"
 	temp_dir_rosetta = worker_temp_root / "rosetta"
-
 	temp_dir_mpnn.mkdir(exist_ok=True)
 	temp_dir_rosetta.mkdir(exist_ok=True)
 
-	print(f"[INFO] Worker {n_thread} temp root: {worker_temp_root}", flush=True)
-		
-	# Assign CPU affinity
+	log(f"Worker {n_thread} temp root: {worker_temp_root}")
+
 	proc = psutil.Process()
 	try:
 		proc.cpu_affinity([n_thread, n_thread + 1])
 	except Exception as e:
-		print(f"[WARNING] Could not set CPU affinity for thread {n_thread}: {e}", flush=True)
-	
+		log(f"Could not set CPU affinity for thread {n_thread}: {e}", level=" WARNING ")
+
 	if not pdb_paths:
-		print(f"[INFO] Thread {n_thread} received no PDBs — skipping.", flush=True)
+		log(f"Thread {n_thread} received no PDBs — skipping.", level=" WARNING ")
 		return []
 
-	res_to_mutate_list = residues_to_mutate
+	res_to_mutate_list = cfg["residues_to_mutate"]
 	chain_res_design_dict = {"A": res_to_mutate_list, "B": res_to_mutate_list}
 
 	pre_step_1 = pdb_paths
-	print(f"[INFO.execute_pipeline] pdb_paths: {pdb_paths}", flush=True)
+	log(f"pdb_paths: {pdb_paths}")
 
-	# Backrub stage
-	if USE_backrub:
-		print(f"[INFO.execute_pipeline] USE BACKRUB TRUE", flush=True)
+	if cfg["use_backrub"]:
+		log("USE BACKRUB TRUE")
 		backrub_designs = energy_methods_original.perform_chainA_backrub(
 			pdb_paths,
 			backrub_path,
-			n_struct_backrub=n_struct_backrub,
-			n_trials_backrub=n_trials_backrub,
+			n_struct_backrub=cfg["n_struct_backrub"],
+			n_trials_backrub=cfg["n_trials_backrub"],
 			chain_res_design_dict=chain_res_design_dict,
 		)
 		pre_step_1 = backrub_designs
-		print(f"[INFO.execute_pipeline] backrub files: {pre_step_1}", flush=True)
+		log(f"backrub files: {pre_step_1}")
 
-	# -------- Step 1 --------
-	print(f"\n[INFO.execute_pipeline] Starting Design Round 1", flush=True)
+	print("\n")
+	log("Starting Design Round 1")
 	step_1_passed = energy_methods_original.design_round_for_WT(
 		pre_step_1,
 		protein_mpnn_1_path,
-		USE_ProteinMPNN,
-		USE_RosettaDesign,
-		USE_relaxed_input,
+		cfg["use_protein_mpnn"],
+		cfg["use_rosetta_design"],
+		cfg["use_relaxed_input"],
 		n_thread,
-		N_TRIALS,
-		N_PASS,
-		BIAS_FLAG,
-		TIED_FLAG,
+		cfg["n_trials"],
+		cfg["n_pass"],
+		cfg["bias_flag"],
+		cfg["tied_flag"],
 		chain_res_design_dict,
 		temp_dir_mpnn=str(temp_dir_mpnn),
 		temp_dir_rosetta=str(temp_dir_rosetta),
 	)
 
-	print(f"[INFO.execute_pipeline] Step 1 passed: {step_1_passed}", flush=True)
+	log(f"Step 1 passed: {step_1_passed}")
 
 	step_1_list = []
 	for file in step_1_passed:
@@ -173,32 +158,32 @@ def execute_pipeline(
 		try:
 			entry = energy_methods_original.get_dgDSASA_dict(file, entry)
 		except Exception as e:
-			print(f"[ERROR.execute_pipeline] Step 1 failed for {file}: {e}", flush=True)
+			log(f"Step 1 failed for {file}: {e}")
 			continue
 		step_1_list.append(entry)
 
 	if step_1_list:
 		pd.DataFrame(step_1_list).to_csv(csv_step1, mode="a", index=False, header=False)
 
-	# -------- Step 2 --------
-	print(f"\n[INFO.execute_pipeline] Starting Design Round 2", flush=True)
+	print("\n")
+	log("Starting Design Round 2")
 	step_2_passed = energy_methods_original.design_round_for_WT(
 		step_1_passed,
 		protein_mpnn_2_path,
-		USE_ProteinMPNN,
-		USE_RosettaDesign,
-		True,  # step2 always uses relaxed inputs
+		cfg["use_protein_mpnn"],
+		cfg["use_rosetta_design"],
+		True,
 		n_thread,
-		N_TRIALS,
-		N_PASS,
-		BIAS_FLAG,
-		TIED_FLAG,
+		cfg["n_trials"],
+		cfg["n_pass"],
+		cfg["bias_flag"],
+		cfg["tied_flag"],
 		chain_res_design_dict,
 		temp_dir_mpnn=str(temp_dir_mpnn),
 		temp_dir_rosetta=str(temp_dir_rosetta),
 	)
 
-	print(f"[INFO.execute_pipeline] Step 2 passed: {step_2_passed}", flush=True)
+	log(f"Step 2 passed: {step_2_passed}")
 
 	step_2_list = []
 	for file in step_2_passed:
@@ -206,105 +191,99 @@ def execute_pipeline(
 		try:
 			entry = energy_methods_original.get_dgDSASA_dict(file, entry)
 		except Exception as e:
-			print(f"[ERROR.execute_pipeline] Step 2 failed for {file}: {e}", flush=True)
+			log(f"Step 2 failed for {file}: {e}")
 			continue
 		step_2_list.append(entry)
 
 	if step_2_list:
 		pd.DataFrame(step_2_list).to_csv(csv_step2, mode="a", index=False, header=False)
 
-	return step_1_passed
+	return step_1_passed,step_2_passed
 
 
-# ============================================================
-# === MAIN ====================================================
-# ============================================================
 def main():
-	# ============================================================
-	# PRINT SETTINGS
-	# ============================================================
-	print("\n========== PIPELINE CONFIGURATION ==========")
-	print(f"Input folder:          {input_folder}")
-	print(f"Output base directory: {directory_name}")
-	print(f"Run name:              {run_name}")
+	parser = argparse.ArgumentParser()
+	parser.add_argument("--config", required=True, help="Path to YAML config file")
+	args = parser.parse_args()
 
-	print("--- Flags ---")
-	print(f"ProteinMPNN enabled:   {USE_ProteinMPNN}")
-	print(f"Rosetta Design:        {USE_RosettaDesign}") #ie. after mpnn.
-	print(f"Relaxed inputs:        {USE_relaxed_input}")
-	print(f"Backrub enabled:       {USE_backrub}")
-	print(f"Bias flag:             {BIAS_FLAG}")
-	print(f"Tied flag:             {TIED_FLAG}")
+	cfg = load_config(args.config)
+	protein_mpnn_parent = setup_imports(cfg)
 	
-	print("--- Backrub Parameters ---")
-	print(f"Backrub enabled:       {USE_backrub}")
-	print(f"n struct backrub:      {n_struct_backrub}")
-	print(f"n trials backrub:      {n_trials_backrub}")
+	from utilities import make_chunks, make_dir, log
+	import energy_methods_original
+	from ProteinMPNN import protein_mpnn_run  # noqa: F401
 
+	print("\n========== PIPELINE CONFIGURATION ==========")
+	print(f"Input folder:          {cfg['input_folder']}")
+	print(f"Output base directory: {cfg['directory_name']}")
+	print(f"Run name:              {cfg['run_name']}")
+	print("--- Flags ---")
+	print(f"ProteinMPNN enabled:   {cfg['use_protein_mpnn']}")
+	print(f"Rosetta Design:        {cfg['use_rosetta_design']}")
+	print(f"Relaxed inputs:        {cfg['use_relaxed_input']}")
+	print(f"Backrub enabled:       {cfg['use_backrub']}")
+	print(f"Bias flag:             {cfg['bias_flag']}")
+	print(f"Tied flag:             {cfg['tied_flag']}")
+	print("--- Backrub Parameters ---")
+	print(f"n struct backrub:      {cfg['n_struct_backrub']}")
+	print(f"n trials backrub:      {cfg['n_trials_backrub']}")
 	print("--- Design Parameters ---")
-	print(f"n_trials:              {N_TRIALS}")
-	print(f"n_pass:                {N_PASS}")
-	print(f"num_threads:           {NUM_THREADS}")
+	print(f"n_trials:              {cfg['n_trials']}")
+	print(f"n_pass:                {cfg['n_pass']}")
+	print(f"num_threads:           {cfg['num_threads']}")
 	print("============================================\n")
 
-	pattern = os.path.join(input_folder, "*.pdb")
+	pattern = os.path.join(cfg["input_folder"], "*.pdb")
 	list_of_binders = glob.glob(pattern)
-	print(f"[INFO] Found {len(list_of_binders)} PDB files")
+	log(f"Found {len(list_of_binders)} PDB files")
 
-	num_threads = min(NUM_THREADS, len(list_of_binders))
+	num_threads = min(cfg["num_threads"], len(list_of_binders)) if list_of_binders else 0
+	chunks = make_chunks(list_of_binders, num_threads) if num_threads > 0 else {}
+	log(f"Num chunks: {chunks}")
 
-	chunks = make_chunks(list_of_binders, num_threads)
-	print(f"[INFO] Num chunks: {chunks}")
-	threads = []
-
-	# Output directories
-	base_output = Path(directory_name)
-	run_dir = base_output / run_name
+	base_output = Path(cfg["directory_name"])
+	run_dir = base_output / cfg["run_name"]
 	scoring_dir = run_dir / "scoring"
 	step1_dir = run_dir / "step1"
 	step2_dir = run_dir / "step2"
 	backrub_dir = run_dir / "backrub_outputs"
-	# log_dir = run_dir / "log_files"
 
-	for d in [base_output, run_dir, scoring_dir,step1_dir, step2_dir, backrub_dir,]:
+	for d in [base_output, run_dir, scoring_dir, step1_dir, step2_dir, backrub_dir]:
 		make_dir(d)
 
-	protein_base_name = os.path.basename(directory_name)
-	csv_suffix = f"_{protein_base_name}_{run_name}.csv"
+	protein_base_name = os.path.basename(cfg["directory_name"])
+	csv_suffix = f"_{protein_base_name}_{cfg['run_name']}.csv"
 
-	global csv_step1, csv_step2
 	csv_step1 = str(scoring_dir / f"step_1_design{csv_suffix}")
 	csv_step2 = str(scoring_dir / f"step_2_design{csv_suffix}")
 
-	# Initialize CSVs
 	for csv_file in [csv_step1, csv_step2]:
-		if not os.path.exists(csv_file):
-			with open(csv_file, "w", newline="") as f:
-				writer = csv.writer(f)
-				writer.writerow(energy_methods_original.get_dgDSASA_keys())
+		with open(csv_file, "w", newline="") as f:
+			writer = csv.writer(f)
+			writer.writerow(energy_methods_original.get_dgDSASA_keys())
 
-	# Spawn worker threads
+	threads = []
 	for thread_num in range(num_threads):
-
-		args = (
+		args_tuple = (
 			chunks[thread_num],
 			str(step1_dir),
 			str(step2_dir),
 			str(backrub_dir),
-			None,  # temp_dir_mpnn (handled inside execute_pipeline)
-			None,  # temp_dir_rosetta (handled inside execute_pipeline)
 			thread_num,
 			str(run_dir),
+			cfg,
+			csv_step1,
+			csv_step2,
 		)
 
-		p = mp.Process(target=execute_pipeline, args=args)
+		p = mp.Process(target=execute_pipeline, args=args_tuple)
 		threads.append(p)
 		p.start()
 
 	for t in threads:
 		t.join()
 
-		print(f"\n✅ All outputs stored in: {run_dir}\n")
+	log(f"All outputs stored in: {run_dir}\n")
 
 
 if __name__ == "__main__":

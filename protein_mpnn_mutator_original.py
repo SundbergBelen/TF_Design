@@ -8,6 +8,14 @@ from ProteinMPNN.helper_scripts import parse_multiple_chains, \
     assign_fixed_chains, make_fixed_positions_dict, make_tied_positions_dict
 
 
+def safe_get_args(get_args_func):
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [sys.argv[0]]
+        return get_args_func()
+    finally:
+        sys.argv = original_argv
+
 def protein_mpnn_maker(pdb_path, chain_path, seq_path, chains_to_design='', mutable_positions='',
                        number_of_predictions=8, sorting_temperature=".5", bias_flag: bool = True, tied_flag: bool = False) -> str:
     """
@@ -33,25 +41,27 @@ def protein_mpnn_maker(pdb_path, chain_path, seq_path, chains_to_design='', muta
     @return: str, path to .fa files containing the proteinmpnn output sequence.
     """
 
+    log(f"Starting protein mpnn maker...")
+
     parsed_chain = str(os.path.join(chain_path, pdb_path.split("/")[-1]))[0:-4] + "_parsed_chain.jsonl"
     design_chains = str(os.path.join(chain_path, pdb_path.split("/")[-1]))[0:-4] + "_designed_chain.jsonl"
     kept_residues = str(os.path.join(chain_path, pdb_path.split("/")[-1]))[0:-4] + "_unmutable_chain.jsonl"
     tied_residues = str(os.path.join(chain_path, pdb_path.split("/")[-1]))[0:-4] + "_tied_positions.jsonl"
 
-    args_parsed_chains = parse_multiple_chains.get_args()
+    args_parsed_chains = safe_get_args(parse_multiple_chains.get_args)
     setattr(args_parsed_chains, "input_path", pdb_path)
     setattr(args_parsed_chains, "output_path", parsed_chain)
     parse_multiple_chains.main(args_parsed_chains)
 
     if chains_to_design:
-        args_designed_chain = assign_fixed_chains.get_args()
+        args_designed_chain = safe_get_args(assign_fixed_chains.get_args)
         setattr(args_designed_chain, "input_path", parsed_chain)
         setattr(args_designed_chain, "output_path", design_chains)
         setattr(args_designed_chain, "chain_list", chains_to_design)
         assign_fixed_chains.main(args_designed_chain)
 
     if mutable_positions:
-        args_kept_residues = make_fixed_positions_dict.get_args()
+        args_kept_residues = safe_get_args(make_fixed_positions_dict.get_args)
         setattr(args_kept_residues, "input_path", parsed_chain)
         setattr(args_kept_residues, "output_path", kept_residues)
         setattr(args_kept_residues, "chain_list", chains_to_design)
@@ -88,7 +98,7 @@ def protein_mpnn_maker(pdb_path, chain_path, seq_path, chains_to_design='', muta
 
         make_tied_positions_dict.main(args_tied_positions)
 
-    args_run_proteinmpnn = protein_mpnn_run.get_args()
+    args_run_proteinmpnn = safe_get_args(protein_mpnn_run.get_args)
     setattr(args_run_proteinmpnn, "pdb_path", pdb_path)
     setattr(args_run_proteinmpnn, "jsonl_path", parsed_chain)
     if chains_to_design:
@@ -101,11 +111,11 @@ def protein_mpnn_maker(pdb_path, chain_path, seq_path, chains_to_design='', muta
     setattr(args_run_proteinmpnn, "num_seq_per_target", number_of_predictions)
     setattr(args_run_proteinmpnn, "out_folder", seq_path)
     if bias_flag:
-        print("running mpnn with AA bias")
+        log("running mpnn with AA bias")
         bias_aa_path = '/ifs/scratch/home/eca2133/final_part/PARROTS-Pipeline-main/bias_AA.jsonl'
         setattr(args_run_proteinmpnn, "bias_AA_jsonl", bias_aa_path)
     else:
-        print("not using AA bias for mpnn")
+        log("not using AA bias for mpnn")
     protein_mpnn_run.main(args_run_proteinmpnn)
     return str(pdb_path.split("/")[-1])[0:-4] + ".fa"
 
@@ -128,7 +138,6 @@ def protein_mpnn_designs(
 ) -> list:
 
     """
-
     Runs protein mpnn for one pdb file, it requires various directories to save required inputs and outputs.
     Important info when using this:
         - ProteinMPNN has its own numbering system, where each chain starts at 1, use function utilities.get_mutable_list_from_residue_selector to get from residue selector to proteinmpnn list
@@ -149,9 +158,8 @@ def protein_mpnn_designs(
     @return: list of paths to passed models.
     """
 
-
     file = path_to_pdb.split("/")[-1][0:-4]
-    print(f"[INFO.protein_mpnn_designs] Starting Protein MPNN design for file: {file}")
+    log(f"Starting Protein MPNN design for file: {file}")
 
     mutable_positions = ", ".join([" ".join(m) for m in mutable_list])
 
@@ -216,19 +224,18 @@ def protein_mpnn_designs(
             #'separated_interface/dSASAx100']
 
         #NEW CODE
-        print(f"[INFO.protein_mpnn_designs] Filtering based on separated_interface/dSASAx100")
+        log(f"Filtering based on separated_interface/dSASAx100")
         new = energy_methods_original.get_dgDSASA_dict(pdb_abs_path, current_dict)[
         'separated_interface/dSASAx100']
         
         mut_dict[index] = [solution, name_file, new]
-        print(f"[INFO.protein_mpnn_designs] This is mut_dict[index]: {mut_dict[index]}")
+        log(f"This is mut_dict[index]: {mut_dict[index]}")
 
     keys = get_keys_with_lowest_scores(mut_dict, n_pass)
 
     for i in keys:
         mut_dict[i][0].dump_pdb(mut_dict[i][1])
         solutions.append(mut_dict[i][1])
-    print(f"[INFO.protein_mpnn_designs] mut_dict[i][1]: {mut_dict[i][1]}")
-    print(f"[INFO.protein_mpnn_designs] solutions: {solutions}")
-    print(f"[INFO.protein_mpnn_designs] thread_num: {thread_num}")
+    log(f"mut_dict[i][1]: {mut_dict[i][1]}",thread=thread_num)
+    log(f"solutions: {solutions}", thread=thread_num)
     return solutions

@@ -38,4 +38,4 @@ echo "Running in environment: $(conda info --envs | grep '*' | awk '{print $1}')
 SCRIPT="/ifs/scratch/home/bs3281/TF_Project_BS/PIPELINE_BS/Design_and_Score_backrub.py"
 
 # run design script 
-python -u $SCRIPT 2>&1
+python -u $SCRIPT --config "$1"
