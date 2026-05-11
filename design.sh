@@ -10,7 +10,7 @@
 
 export PYTHONUNBUFFERED=1
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 # >>> conda initialize >>>
 # !! Contents within this block are managed by 'conda init' !!
 __conda_setup="$('/ifs/scratch/public_softwares/mambaforge/bin/conda' 'shell.zsh' 'hook' 2> /dev/null)"

@@ -1,24 +1,21 @@
-# this is the code I have been editing to fix backrub issue
+# this is the original, untouched code
 
 import os, sys
 import subprocess
-import gzip
-import shutil
-import tempfile
+import pandas
 import pandas as pd
 from utilities import *
 import pyrosetta
 import csv
 from pyrosetta import init, pose_from_file
 from protein_mpnn_mutator_original import protein_mpnn_designs
-from pyrosetta.rosetta.protocols.backrub import BackrubProtocol
-from pyrosetta.rosetta.utility import vector1_unsigned_long
 from pyrosetta.rosetta.core.select.residue_selector import ChainSelector
 from pyrosetta.rosetta.core.pack.task import TaskFactory
 from pyrosetta.rosetta.core.pack.task.operation import InitializeFromCommandline, RestrictResidueToRepacking
 from pyrosetta.rosetta.protocols.task_operations import RestrictChainToRepackingOperation
 from pyrosetta.rosetta.core.pack.task.operation import RestrictToRepacking
 from pyrosetta.rosetta.protocols.backrub import BackrubMover
+from pyrosetta.rosetta.core.select.movemap import MoveMapFactory
 from pyrosetta.rosetta.protocols.simple_filters import ContactMolecularSurfaceFilter
 from pyrosetta.rosetta.core.scoring import CA_rmsd
 import time
@@ -417,84 +414,7 @@ def relax(Pose: pyrosetta.Pose,
 	return working_pose
 
 
-def dump_pdb_gz(pose, path_gz):
-    tmp_path = path_gz[:-3]
-    pose.dump_pdb(tmp_path)
-
-    with open(tmp_path, "rb") as f_in:
-        with gzip.open(path_gz, "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
-
-    os.remove(tmp_path)
-
-def ca_rmsd_for_residue_list(pose_ref, pose_mobile, resnums):
-	"""
-	Compute CA RMSD for a specific list of pose-numbered residues.
-	Useful when the residues are not one continuous range.
-	"""
-	import math
-
-	if not resnums:
-		return 0.0
-
-	sq_sum = 0.0
-	n = 0
-
-	for r in resnums:
-		if not pose_ref.residue(r).has("CA"):
-			continue
-		if not pose_mobile.residue(r).has("CA"):
-			continue
-
-		xyz_ref = pose_ref.residue(r).xyz("CA")
-		xyz_mobile = pose_mobile.residue(r).xyz("CA")
-
-		dx = xyz_ref.x - xyz_mobile.x
-		dy = xyz_ref.y - xyz_mobile.y
-		dz = xyz_ref.z - xyz_mobile.z
-
-		sq_sum += dx*dx + dy*dy + dz*dz
-		n += 1
-
-	if n == 0:
-		return 0.0
-
-	return math.sqrt(sq_sum / n)
-
-
-def run_backrub_protocol_in_output_dir(br_protocol, pose, output_dir):
-	import os
-	import glob
-
-	old_cwd = os.getcwd()
-	make_dir(output_dir)
-
-	try:
-		os.chdir(output_dir)
-		br_protocol.apply(pose)
-
-		low_files = sorted(glob.glob("*_low.pdb"))
-		last_files = sorted(glob.glob("*_last.pdb"))
-
-		low_file = low_files[-1] if low_files else None
-		last_file = last_files[-1] if last_files else None
-
-	finally:
-		os.chdir(old_cwd)
-
-	return low_file, last_file
-
-def perform_chainA_backrub(
-	pdb_list: list,
-	backrub_output: os.path,
-	n_struct_backrub=10,
-	n_trials_backrub=1000,
-	chain_res_design_dict={},
-	write_trajectory=False,
-	trajectory_stride=10,
-	trajectory_gz=False,
-):
-	
+def perform_chainA_backrub(pdb_list: list, backrub_output: os.path, n_struct_backrub=10, n_trials_backrub=1000,chain_res_design_dict={}):
 	log(f"PERFORMING perform_chainA_backrub IN ENERGY METHODS")
 	#init()
 	make_dir(backrub_output)
@@ -528,109 +448,56 @@ def perform_chainA_backrub(
 
 		log("Neighborhood residues:", nbr_resnums)
 
-		# previous code with default move map factory
-		# mmf = pyrosetta.rosetta.core.select.movemap.MoveMapFactory()
+		mmf = pyrosetta.rosetta.core.select.movemap.MoveMapFactory()
 		
-		# mmf.add_bb_action(pyrosetta.rosetta.core.select.movemap.move_map_action.mm_enable, hsa_res_selector)
-		# mmf.add_bb_action(pyrosetta.rosetta.core.select.movemap.move_map_action.mm_enable, nbr_selector)
+		mmf.add_bb_action(pyrosetta.rosetta.core.select.movemap.move_map_action.mm_enable, hsa_res_selector)
+		mmf.add_bb_action(pyrosetta.rosetta.core.select.movemap.move_map_action.mm_enable, nbr_selector)
 
-		# mm = mmf.create_movemap_from_pose(working_pose)
+		mm = mmf.create_movemap_from_pose(working_pose)
 
-		# bb_true = []
-		# chi_true = []
+		bb_true = []
+		chi_true = []
 
-		# for i in range(1, working_pose.total_residue() + 1):
-		# 	if mm.get_bb(i):
-		# 		bb_true.append(i)
-		# 	if mm.get_chi(i):
-		# 		chi_true.append(i)
+		for i in range(1, working_pose.total_residue() + 1):
+			if mm.get_bb(i):
+				bb_true.append(i)
+			if mm.get_chi(i):
+				chi_true.append(i)
 
-		# log(f"MoveMap bb-allowed residues: {bb_true}")
-		# log(f"MoveMap chi-allowed residues: {chi_true}")
+		log(f"MoveMap bb-allowed residues: {bb_true}")
+		log(f"MoveMap chi-allowed residues: {chi_true}")
 
-		from pyrosetta.rosetta.core.id import AtomID 
+		br_mover = pyrosetta.rosetta.protocols.backrub.BackrubMover()
+		br_mover.set_movemap_factory(mmf)
 
-		# Get originally selected residues, only for RMSD tracking/debugging
+		# PRIME THE MOVER
+		log(f"Priming backrub mover (defaults to all residues)...") # backrub needs to be applied before you add segments...
+		temp_pose = pyrosetta.Pose(working_pose)
+		br_mover.apply(temp_pose)
+
+		log(f"Clearing segments...")
+		br_mover.clear_segments()
+
+		from pyrosetta.rosetta.core.id import AtomID
+
 		subset = hsa_res_selector.apply(working_pose)
 		resnums = pyrosetta.rosetta.core.select.get_residues_from_subset(subset)
 		start_resnum = min(resnums)
 		end_resnum = max(resnums)
 
-		backrub_movable_resnums=sorted(resnums)
-		log(f"Initially selected residues for backrub: {backrub_movable_resnums}")
+		log("Selected residues (pose numbering):", resnums)
 
-		# # Build expanded backrub segments:
-		# # selected helix 275-281 -> pivots 274-282
-		# backrub_segments = []
-		# backrub_movable_resnums = []
+		for i in resnums:
+			if i > 1 and i < working_pose.total_residue():
+				ca1 = working_pose.residue(i-1).atom_index("CA")
+				ca2 = working_pose.residue(i+1).atom_index("CA")
 
-		# for chain_id, res_list in chain_res_design_dict.items():
-		# 	pose_resnums = sorted(
-		# 		info.pdb2pose(chain_id, res)
-		# 		for res in res_list
-		# 		if info.pdb2pose(chain_id, res) != 0
-		# 	)
+				br_mover.add_segment(
+					AtomID(ca1, i-1),
+					AtomID(ca2, i+1)
+				)
 
-		# 	if len(pose_resnums) < 3:
-		# 		log(f"Skipping chain {chain_id}: need at least 3 residues for backrub")
-		# 		continue
-
-		# 	selected_start = pose_resnums[0]
-		# 	selected_end = pose_resnums[-1]
-
-		# 	chain_num = working_pose.chain(selected_start)
-		# 	chain_start = working_pose.chain_begin(chain_num)
-		# 	chain_end = working_pose.chain_end(chain_num)
-
-		# 	start = selected_start - 1 if selected_start > chain_start else selected_start
-		# 	end = selected_end + 1 if selected_end < chain_end else selected_end
-
-		# 	backrub_segments.append((chain_id, selected_start, selected_end, start, end))
-		# 	backrub_movable_resnums.extend(range(start, end + 1))
-
-		# backrub_movable_resnums = sorted(set(backrub_movable_resnums))
-
-		# log(f"Backrub RMSD residues: {backrub_movable_resnums}")
-
-		explicit_mm = pyrosetta.MoveMap()
-		explicit_mm.set_bb(False)
-		explicit_mm.set_chi(False)
-
-		for r in backrub_movable_resnums:
-			explicit_mm.set_bb(r, True)
-			explicit_mm.set_chi(r, True)
-
-		log(f"Explicit MoveMap bb check: {[r for r in backrub_movable_resnums if explicit_mm.get_bb(r)]}")
-		log(f"Explicit MoveMap chi check: {[r for r in backrub_movable_resnums if explicit_mm.get_chi(r)]}")
-
-		br_mover = pyrosetta.rosetta.protocols.backrub.BackrubMover()
-		br_mover.set_movemap(explicit_mm)
-
-		log("Priming backrub mover with explicit MoveMap...")
-		temp_pose = pyrosetta.Pose(working_pose)
-		br_mover.apply(temp_pose)
-
-		# IMPORTANT: do not clear segments here
-		log(f"Num backrub segments after auto setup: {br_mover.num_segments()}")
-		log(f"Backrub RMSD residues: {backrub_movable_resnums}")
-
-		# log("Clearing segments...")
-		# br_mover.clear_segments()
-
-		# for chain_id, selected_start, selected_end, start, end in backrub_segments:
-		# 	ca_start = working_pose.residue(start).atom_index("CA")
-		# 	ca_end = working_pose.residue(end).atom_index("CA")
-
-		# 	br_mover.add_segment(
-		# 		AtomID(ca_start, start),
-		# 		AtomID(ca_end, end)
-		# 	)
-
-		# 	log(
-		# 		f"Added expanded helix-span backrub segment for chain {chain_id}: "
-		# 		f"selected {selected_start}-{selected_end}, pivots {start}-{end}"
-		# 	)
-		
+		log(f"Num segments from neighborhood selector: {br_mover.num_()}")
 		# br_protocol = pyrosetta.rosetta.protocols.backrub.BackrubProtocol()
 		# print(f"[INFO.perform_chainA_backrub] backrub mover type: {type(br_mover)}")
 
@@ -656,30 +523,13 @@ def perform_chainA_backrub(
 
 			pose_copy = pyrosetta.Pose(working_pose)
 
-			traj_dir = None
-			if write_trajectory:
-				traj_dir = os.path.join(
-					backrub_output,
-					f"{file}_{index}_trajectory"
-				)
-				make_dir(traj_dir)
-
-				log(
-					f"Writing backrub trajectory every {trajectory_stride} steps "
-					f"to {traj_dir} gzip={trajectory_gz}"
-				)
-
 			# --- Prove raw backrub actually moves atoms before MC ---
 			pose0 = pyrosetta.Pose(pose_copy)
 
 			for _ in range(5):
 				br_mover.apply(pose_copy)
 
-			first_rmsd = ca_rmsd_for_residue_list(
-				pose0,
-				pose_copy,
-				backrub_movable_resnums
-			)
+			first_rmsd = CA_rmsd(pose0, pose_copy, start_resnum, end_resnum) #rn just for one helix. 
 
 			if first_rmsd < 5e-3:
 				raise RuntimeError(
@@ -691,7 +541,7 @@ def perform_chainA_backrub(
 			# reset pose before MC
 			pose_copy.assign(pose0)
 
-			temperature_set = 0.6
+			temperature_set = 2.0
 
 			mc = pyrosetta.rosetta.protocols.moves.MonteCarlo(
 				pose_copy,
@@ -703,14 +553,12 @@ def perform_chainA_backrub(
 			start = time.time()
 
 			log(f"Running {n_trials_backrub} MC trials...")
-			log(f"Temperature: {temperature_set}")
 
 			print_interval = max(1, n_trials_backrub // 20)
 
 			# --- reset per-trajectory tracking ---
 			lowest_score = scorefxn(pose_copy)
 			lowest_pose = pose_copy.clone()
-
 
 			for step in range(n_trials_backrub):
 
@@ -725,33 +573,11 @@ def perform_chainA_backrub(
 					lowest_score = current_score
 					lowest_pose = pose_copy.clone()
 
-				if write_trajectory and step % trajectory_stride == 0:
-					if trajectory_gz:
-						traj_path = os.path.join(
-							traj_dir,
-							f"{file}_{index}_step{step:05d}.pdb.gz"
-						)
-						dump_pdb_gz(pose_copy, traj_path)
-						log(f"Wrote gzipped trajectory frame: {traj_path}")
-					else:
-						traj_path = os.path.join(
-							traj_dir,
-							f"{file}_{index}_step{step:05d}.pdb"
-						)
-						pose_copy.dump_pdb(traj_path)
-						log(f"Wrote trajectory frame: {traj_path}")
-
 				if step % print_interval == 0 or step == n_trials_backrub - 1:
-					rmsd_now = ca_rmsd_for_residue_list(
-						pose0,
-						pose_copy,
-						backrub_movable_resnums
-					)
 					log(
 						f"MC step {step}/{n_trials_backrub} "
 						f"({100*step/n_trials_backrub:.1f}%)  "
 						f"Accepted: {accepted}",
-						f"RMSD_now={rmsd_now:.3f} Å"
 					)
 
 			end = time.time()
@@ -770,6 +596,8 @@ def perform_chainA_backrub(
 			last_pose = pose_copy.clone()
 			last_score = scorefxn(last_pose)
 
+			
+
 			# --------------------------------------------------
 			# Output paths
 			# --------------------------------------------------
@@ -782,26 +610,15 @@ def perform_chainA_backrub(
 				backrub_output,
 				f"{file}_{index}_lowest_br.pdb")
 
-			last_pose.dump_pdb(last_path)
-			lowest_pose.dump_pdb(lowest_path)
-
+			last_pose.dump_pdb(last_path) #only dumping last.
+			# lowest_pose.dump_pdb(lowest_path)
 			final.append(last_path)
-			final.append(lowest_path)
 
 			log(f"Dump last pdb: {last_path}")
 			log(f"Dump lowest pdb: {lowest_path}")
 
-			lowest_rmsd = ca_rmsd_for_residue_list(
-				pose0,
-				lowest_pose,
-				backrub_movable_resnums
-			)
-
-			last_rmsd = ca_rmsd_for_residue_list(
-				pose0,
-				last_pose,
-				backrub_movable_resnums
-			)
+			lowest_rmsd = CA_rmsd(pose0, lowest_pose)
+			last_rmsd = CA_rmsd(pose0, last_pose)
 
 			log(
 				f"lowest energy={lowest_score:.3f} RMSD={lowest_rmsd:.3f} Å | "
@@ -834,172 +651,6 @@ def perform_chainA_backrub(
 
 	return final
 
-#USE THIS BC OTHERWISE BACKRUB DOESN'T DO ENOUGH... (IF ONLY USING MOVER). THIS DOES THE SAME AS THE C++
-def perform_chainA_backrub_protocol(
-	pdb_list,
-	backrub_output,
-	n_struct_backrub=2,
-	chain_res_design_dict={},
-):
-	from pyrosetta.rosetta.protocols.backrub import BackrubProtocol
-	from pyrosetta.rosetta.utility import vector1_unsigned_long
-
-	log("PERFORMING BackrubProtocol version")
-	make_dir(backrub_output)
-
-	final = []
-	score_rows = []
-	scorefxn = pyrosetta.get_fa_scorefxn()
-
-	for pdb_path in pdb_list:
-		file = os.path.basename(pdb_path)[:-4]
-		working_pose = pyrosetta.pose_from_file(pdb_path)
-		info = working_pose.pdb_info()
-
-		# Build pivot residue list exactly like your app command:
-		# 275-281 and matching chain-B pose residues 620-626
-		pivot_resnums = []
-
-		for chain_id, res_list in chain_res_design_dict.items():
-			for res in res_list:
-				pose_res = info.pdb2pose(chain_id, res)
-				if pose_res != 0:
-					pivot_resnums.append(pose_res)
-
-		pivot_resnums = sorted(set(pivot_resnums))
-		log(f"BackrubProtocol pivot residues: {pivot_resnums}")
-
-		# For RMSD tracking
-		backrub_movable_resnums = pivot_resnums
-
-		input_score = scorefxn(working_pose)
-		score_rows.append({
-			"structure_type": "input",
-			"trajectory": -1,
-			"pdb_path": file,
-			"score": input_score,
-			"rmsd": 0.0,
-		})
-
-		for i in range(n_struct_backrub):
-			pose_copy = working_pose.clone()
-			pose0 = working_pose.clone()
-
-			score_original_input = scorefxn(pose0)
-			# Optional: score before protocol apply
-			score_before_protocol = scorefxn(pose_copy)
-
-
-			pivot_vec = vector1_unsigned_long()
-			for r in pivot_resnums:
-				pivot_vec.append(r)
-
-			br_protocol = BackrubProtocol()
-			br_protocol.set_scorefunction(scorefxn)
-			br_protocol.set_pivot_residues(pivot_vec)
-
-			# This asks protocol to dump _last and _low intermediate structures
-			# using its internal behavior.
-			# br_protocol.set_dump_poses(True)
-
-
-			log(f"Score before BackrubProtocol apply: {score_before_protocol:.3f}")
-			log(f"Applying BackrubProtocol trajectory {i}")
-
-			protocol_tmp_dir = os.path.join(
-				backrub_output,
-				f"{file}_{i}_protocol_tmp"
-			)
-			make_dir(protocol_tmp_dir)
-
-			internal_low_file, internal_last_file = run_backrub_protocol_in_output_dir(
-				br_protocol,
-				pose_copy,
-				protocol_tmp_dir,
-			)
-
-			low_path = os.path.join(
-				backrub_output,
-				f"{file}_{i}_backrub_protocol_low.pdb"
-			)
-
-			last_path = os.path.join(
-				backrub_output,
-				f"{file}_{i}_backrub_protocol_last.pdb"
-			)
-
-			for p in [low_path, last_path]:
-				if os.path.exists(p):
-					os.remove(p)
-
-			# BackrubProtocol usually leaves pose_copy as the low pose.
-			# Still move the internally dumped files when available.
-			if internal_low_file is not None:
-				shutil.move(
-					os.path.join(protocol_tmp_dir, internal_low_file),
-					low_path,
-				)
-			else:
-				pose_copy.dump_pdb(low_path)
-
-			if internal_last_file is not None:
-				shutil.move(
-					os.path.join(protocol_tmp_dir, internal_last_file),
-					last_path,
-				)
-			else:
-				log(f"No internal last pose found for trajectory {i}", level=" WARNING ")
-
-			log(f"Dumped BackrubProtocol low output {i} to {low_path}")
-			final.append(low_path)
-
-			if os.path.exists(last_path):
-				log(f"Dumped BackrubProtocol last output {i} to {last_path}")
-				final.append(last_path)
-			else:
-				log(f"No BackrubProtocol last output written for trajectory {i}", level=" WARNING ")
-
-			try:
-				os.rmdir(protocol_tmp_dir)
-			except OSError:
-				pass
-
-
-			out_score = scorefxn(pose_copy)
-
-			delta_vs_original_input = out_score - score_original_input
-			delta_vs_protocol_start = out_score - score_before_protocol
-			
-			out_rmsd = ca_rmsd_for_residue_list(
-				pose0,
-				pose_copy,
-				backrub_movable_resnums,
-			)
-
-			log(
-				f"BackrubProtocol output {i}: "
-				f"score={out_score:.3f}, "
-				f"delta_vs_original_input={delta_vs_original_input:.3f}, "
-				f"delta_vs_protocol_start={delta_vs_protocol_start:.3f}, "
-				f"region RMSD={out_rmsd:.3f} Å"
-			)
-
-			score_rows.append({
-				"structure_type": "backrub_protocol_low",
-				"trajectory": i,
-				"score": out_score,
-				"delta_score": delta_vs_original_input,
-				"delta_vs_protocol_start": delta_vs_protocol_start,
-				"rmsd": out_rmsd,
-				"pdb_path": low_path,
-			})
-
-		csv_path = os.path.join(backrub_output, f"{file}_backrub_protocol_scores.csv")
-		write_backrub_score_csv(csv_path, score_rows)
-
-	return final
-
-
 def pre_relax_input(pose: pyrosetta.Pose, iterations: int = 5, constraints: bool = True):
 
 	log(f"Using fast relax with {iterations} iterations. Side chain and start coord constraints are {constraints}")
@@ -1029,7 +680,6 @@ def pre_relax_input(pose: pyrosetta.Pose, iterations: int = 5, constraints: bool
 	return pose
 
 
-
 def write_backrub_score_csv(csv_path, rows):
 	"""
 	Write score summary for backrub structures.
@@ -1040,7 +690,7 @@ def write_backrub_score_csv(csv_path, rows):
 		pdb_path
 		score
 	"""
-	fieldnames = ["structure_type", "trajectory",  "score", "delta_score", "delta_vs_protocol_start", "rmsd", "pdb_path",]
+	fieldnames = ["structure_type", "trajectory", "pdb_path", "score", "rmsd"]
 
 	with open(csv_path, "w", newline="") as f:
 		writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1048,7 +698,6 @@ def write_backrub_score_csv(csv_path, rows):
 		writer.writerows(rows)
 
 	log(f"Wrote score summary CSV: {csv_path}")
-
 
 
 def mut_sequence(new_sequence: str, pose: pyrosetta.rosetta.core.pose.Pose, chain_number: int

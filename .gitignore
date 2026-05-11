@@ -1,0 +1,9 @@
+# Ignore outputs and temporary files
+*.out
+*.csv
+*.png
+*.log
+*.ipynb
+
+bs_test/
+__pycache__/

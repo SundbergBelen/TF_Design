@@ -1,6 +1,6 @@
 inputs:
   input_folder: /ifs/share/TF_Project/Design/TF_project_design_step/GalS/Design_input
-  directory_name: /ifs/scratch/home/bs3281/TF_Project_BS/Production_Runs/test
+  directory_name: /ifs/share/TF_Project/Design/movemap_test/5.0_movemap_local_segments
   run_name: test
   residues_to_mutate: [275, 276, 277, 278, 279, 280, 281]
 

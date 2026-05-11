@@ -42,7 +42,8 @@ def load_config(config_path):
 		"run_name": inputs["run_name"],
 		"residues_to_mutate": inputs["residues_to_mutate"],
 		"n_struct_backrub": options.get("n_struct_backrub", 2),
-		"n_trials_backrub": options.get("n_trials_backrub", 200),
+		"n_trials_backrub": options.get("n_trials_backrub", 1000),
+		"mc_kt": options.get("mc_kt", 0.6),
 		"use_protein_mpnn": options.get("use_protein_mpnn", True),
 		"use_rosetta_design": options.get("use_rosetta_design", False),
 		"use_relaxed_input": options.get("use_relaxed_input", True), #are the inputs already relaxed?
@@ -88,7 +89,14 @@ def execute_pipeline(
 	log(f"Worker {n_thread} starting")
 
 	pyrosetta.init(
-		extra_options="-relax:default_repeats 1 -ignore_zero_occupancy false -multithreading:total_threads 1 -constant_seed false"
+		extra_options=(
+			"-relax:default_repeats 1 "
+			"-ignore_zero_occupancy false "
+			"-multithreading:total_threads 1 "
+			"-constant_seed false "
+			f"-backrub:ntrials {cfg['n_trials_backrub']} "
+			f"-backrub:mc_kt {cfg.get('mc_kt', 0.6)}"
+		)
 	)
 
 	log(f"[PID {os.getpid()}] PyRosetta initialized")
@@ -135,13 +143,23 @@ def execute_pipeline(
 			log("Input already relaxed and backrub enabled -> using input directly for backrub")
 			backrub_input_paths = pdb_paths
 
-		backrub_designs = energy_methods_original.perform_chainA_backrub(
+		# backrub_designs = energy_methods_original.perform_chainA_backrub(
+		# 	backrub_input_paths,
+		# 	backrub_path,
+		# 	n_struct_backrub=cfg["n_struct_backrub"],
+		# 	n_trials_backrub=cfg["n_trials_backrub"],
+		# 	chain_res_design_dict=chain_res_design_dict,
+		# 	write_trajectory=cfg["write_trajectory"],
+		# 	trajectory_stride=cfg["trajectory_stride"],
+		# 	trajectory_gz=cfg["trajectory_gz"],
+		# )
+		backrub_designs = energy_methods_original.perform_chainA_backrub_protocol(
 			backrub_input_paths,
 			backrub_path,
 			n_struct_backrub=cfg["n_struct_backrub"],
-			n_trials_backrub=cfg["n_trials_backrub"],
 			chain_res_design_dict=chain_res_design_dict,
 		)
+
 		pre_step_1 = backrub_designs
 		mpnn_inputs_are_relaxed = True
 	else:
