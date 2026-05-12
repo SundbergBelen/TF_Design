@@ -4,6 +4,7 @@
 *.png
 *.log
 *.ipynb
+!parse_results_final.ipynb
 
 bs_test/
 __pycache__/

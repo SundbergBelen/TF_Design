@@ -39,7 +39,7 @@ def load_config(config_path):
 	cfg = {
 		"input_folder": inputs["input_folder"],
 		"directory_name": inputs["directory_name"],
-		"run_name": inputs["run_name"],
+		"run_name": inputs.get("run_name", None),
 		"residues_to_mutate": inputs["residues_to_mutate"],
 		"n_struct_backrub": options.get("n_struct_backrub", 2),
 		"n_trials_backrub": options.get("n_trials_backrub", 1000),
@@ -89,16 +89,20 @@ def execute_pipeline(
 
 	log(f"Worker {n_thread} starting")
 
-	pyrosetta.init(
-		extra_options=(
-			"-relax:default_repeats 1 "
-			"-ignore_zero_occupancy false "
-			"-multithreading:total_threads 1 "
-			"-constant_seed false "
-			f"-backrub:ntrials {cfg['n_trials_backrub']} "
-			f"-backrub:mc_kt {cfg.get('mc_kt', 0.6)}"
-		)
+	extra_options = (
+		"-relax:default_repeats 1 "
+		"-ignore_zero_occupancy false "
+		"-multithreading:total_threads 1 "
+		"-constant_seed false "
 	)
+
+	if cfg["use_backrub"]:
+		extra_options += (
+			f"-backrub:ntrials {int(cfg['n_trials_backrub'])} "
+			f"-backrub:mc_kt {float(cfg.get('mc_kt', 0.6))} "
+		)
+
+	pyrosetta.init(extra_options=extra_options)
 
 	log(f"[PID {os.getpid()}] PyRosetta initialized")
 
@@ -320,10 +324,11 @@ def main():
 	print(f"Backrub enabled:       {cfg['use_backrub']}")
 	print(f"Bias jsonl:             {cfg['bias_jsonl']}")
 	print(f"Tied flag:             {cfg['tied_flag']}")
-	print("--- Backrub Parameters ---")
-	print(f"n struct backrub:      {cfg['n_struct_backrub']}")
-	print(f"n trials backrub:      {cfg['n_trials_backrub']}")
-	print(f"mc_kt backrub:         {cfg.get('mc_kt', 0.6)}")
+	if cfg['use_backrub'] == True:
+		print("--- Backrub Parameters ---")
+		print(f"n struct backrub:      {cfg['n_struct_backrub']}")
+		print(f"n trials backrub:      {cfg['n_trials_backrub']}")
+		print(f"mc_kt backrub:         {cfg.get('mc_kt', 0.6)}")
 	print("--- Design Parameters ---")
 	print(f"n_trials:              {cfg['n_trials']}")
 	print(f"n_pass:                {cfg['n_pass']}")
@@ -339,7 +344,12 @@ def main():
 	log(f"Num chunks: {chunks}")
 
 	base_output = Path(cfg["directory_name"])
-	run_dir = base_output / cfg["run_name"]
+
+	if cfg.get("run_name"):
+		run_dir = base_output / cfg["run_name"]
+	else:
+		run_dir = base_output
+
 	scoring_dir = run_dir / "scoring"
 	step1_dir = run_dir / "step1"
 	step2_dir = run_dir / "step2"
@@ -349,7 +359,11 @@ def main():
 		make_dir(d)
 
 	protein_base_name = os.path.basename(cfg["directory_name"])
-	csv_suffix = f"_{protein_base_name}_{cfg['run_name']}.csv"
+
+	if cfg.get("run_name"):
+		csv_suffix = f"_{protein_base_name}_{cfg['run_name']}.csv"
+	else:
+		csv_suffix = f"_{protein_base_name}.csv"
 
 	csv_step1 = str(scoring_dir / f"step_1_design{csv_suffix}")
 	csv_step2 = str(scoring_dir / f"step_2_design{csv_suffix}")
@@ -374,6 +388,8 @@ def main():
 
 	for t in threads:
 		t.join()
+		if t.exitcode != 0:
+			raise RuntimeError(f"Worker process failed with exit code {t.exitcode}")
 	
 	merge_worker_csvs(csv_step1, num_threads, dedupe_cols=("name",))
 	merge_worker_csvs(csv_step2, num_threads, dedupe_cols=("name",))
