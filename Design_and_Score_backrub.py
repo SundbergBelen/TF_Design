@@ -48,12 +48,13 @@ def load_config(config_path):
 		"use_rosetta_design": options.get("use_rosetta_design", False),
 		"use_relaxed_input": options.get("use_relaxed_input", True), #are the inputs already relaxed?
 		"use_backrub": options.get("use_backrub", True),
-		"bias_flag": options.get("bias_flag", False),
+		"bias_jsonl": options.get("bias_jsonl", None),
 		"tied_flag": options.get("tied_flag", True),
 		"n_trials": options.get("n_trials", 3),
 		"n_pass": options.get("n_pass", 2),
 		"num_threads": options.get("num_threads", 1),
 		"protein_mpnn_repo": Path(environment["protein_mpnn_repo"]),
+		
 	}
 
 	return cfg
@@ -109,6 +110,14 @@ def execute_pipeline(
 	temp_dir_rosetta = worker_temp_root / "rosetta"
 	temp_dir_mpnn.mkdir(exist_ok=True)
 	temp_dir_rosetta.mkdir(exist_ok=True)
+
+	csv_step1_worker = str(Path(csv_step1).with_name(
+	Path(csv_step1).stem + f"_thread{n_thread}" + Path(csv_step1).suffix
+	))
+
+	csv_step2_worker = str(Path(csv_step2).with_name(
+		Path(csv_step2).stem + f"_thread{n_thread}" + Path(csv_step2).suffix
+	))
 
 	log(f"Worker {n_thread} temp root: {worker_temp_root}")
 
@@ -177,7 +186,7 @@ def execute_pipeline(
 		n_thread,
 		cfg["n_trials"],
 		cfg["n_pass"],
-		cfg["bias_flag"],
+		cfg["bias_jsonl"],
 		cfg["tied_flag"],
 		chain_res_design_dict,
 		temp_dir_mpnn=str(temp_dir_mpnn),
@@ -188,16 +197,28 @@ def execute_pipeline(
 
 	step_1_list = []
 	for file in step_1_passed:
-		entry = {"name": file}
+		entry = {
+			"name": Path(file).stem,
+			"path": file,
+		}
 		try:
-			entry = energy_methods_original.get_dgDSASA_dict(file, entry)
+			entry = energy_methods_original.get_dgDSASA_dict(
+				file,
+				entry,
+				chain_res_design_dict=chain_res_design_dict,
+			)
 		except Exception as e:
 			log(f"Step 1 failed for {file}: {e}")
 			continue
 		step_1_list.append(entry)
 
 	if step_1_list:
-		pd.DataFrame(step_1_list).to_csv(csv_step1, mode="a", index=False, header=False)
+		step_1_df = pd.DataFrame(step_1_list)
+
+		cols = energy_methods_original.get_dgDSASA_keys()
+		step_1_df = step_1_df.reindex(columns=cols)
+
+		step_1_df.to_csv(csv_step1_worker, mode="w", index=False, header=True)
 
 	print("\n")
 	log("Starting Design Round 2")
@@ -210,7 +231,7 @@ def execute_pipeline(
 		n_thread,
 		cfg["n_trials"],
 		cfg["n_pass"],
-		cfg["bias_flag"],
+		cfg["bias_jsonl"],
 		cfg["tied_flag"],
 		chain_res_design_dict,
 		temp_dir_mpnn=str(temp_dir_mpnn),
@@ -221,19 +242,60 @@ def execute_pipeline(
 
 	step_2_list = []
 	for file in step_2_passed:
-		entry = {"name": file}
+		entry = {
+			"name": Path(file).stem,
+			"path": file,
+		}
 		try:
-			entry = energy_methods_original.get_dgDSASA_dict(file, entry)
+			entry = energy_methods_original.get_dgDSASA_dict(
+				file,
+				entry,
+				chain_res_design_dict=chain_res_design_dict,
+			)
 		except Exception as e:
 			log(f"Step 2 failed for {file}: {e}")
 			continue
+
 		step_2_list.append(entry)
 
 	if step_2_list:
-		pd.DataFrame(step_2_list).to_csv(csv_step2, mode="a", index=False, header=False)
+		step_2_df = pd.DataFrame(step_2_list)
+
+		cols = energy_methods_original.get_dgDSASA_keys()
+		step_2_df = step_2_df.reindex(columns=cols)
+
+		step_2_df.to_csv(csv_step2_worker, mode="w", index=False, header=True)
 
 	return step_1_passed,step_2_passed
 
+def merge_worker_csvs(final_csv, num_threads, dedupe_cols=("name",)):
+	final_csv = Path(final_csv)
+	worker_csvs = [
+		final_csv.with_name(final_csv.stem + f"_thread{i}" + final_csv.suffix)
+		for i in range(num_threads)
+	]
+
+	dfs = []
+	for csv_path in worker_csvs:
+		if csv_path.exists() and csv_path.stat().st_size > 0:
+			dfs.append(pd.read_csv(csv_path))
+
+	if not dfs:
+		return
+
+	merged = pd.concat(dfs, ignore_index=True)
+
+	if dedupe_cols is not None:
+		before = len(merged)
+		merged = merged.drop_duplicates(subset=list(dedupe_cols), keep="first").copy()
+		after = len(merged)
+		print(f"[INFO] {final_csv.name}: dropped {before - after} duplicate rows")
+
+	merged.to_csv(final_csv, index=False)
+
+	for csv_path in worker_csvs:
+		if csv_path.exists():
+			csv_path.unlink()
 
 def main():
 	parser = argparse.ArgumentParser()
@@ -256,11 +318,12 @@ def main():
 	print(f"Rosetta Design:        {cfg['use_rosetta_design']}")
 	print(f"Relaxed inputs:        {cfg['use_relaxed_input']}")
 	print(f"Backrub enabled:       {cfg['use_backrub']}")
-	print(f"Bias flag:             {cfg['bias_flag']}")
+	print(f"Bias jsonl:             {cfg['bias_jsonl']}")
 	print(f"Tied flag:             {cfg['tied_flag']}")
 	print("--- Backrub Parameters ---")
 	print(f"n struct backrub:      {cfg['n_struct_backrub']}")
 	print(f"n trials backrub:      {cfg['n_trials_backrub']}")
+	print(f"mc_kt backrub:         {cfg.get('mc_kt', 0.6)}")
 	print("--- Design Parameters ---")
 	print(f"n_trials:              {cfg['n_trials']}")
 	print(f"n_pass:                {cfg['n_pass']}")
@@ -291,11 +354,6 @@ def main():
 	csv_step1 = str(scoring_dir / f"step_1_design{csv_suffix}")
 	csv_step2 = str(scoring_dir / f"step_2_design{csv_suffix}")
 
-	for csv_file in [csv_step1, csv_step2]:
-		with open(csv_file, "w", newline="") as f:
-			writer = csv.writer(f)
-			writer.writerow(energy_methods_original.get_dgDSASA_keys())
-
 	threads = []
 	for thread_num in range(num_threads):
 		args_tuple = (
@@ -316,6 +374,9 @@ def main():
 
 	for t in threads:
 		t.join()
+	
+	merge_worker_csvs(csv_step1, num_threads, dedupe_cols=("name",))
+	merge_worker_csvs(csv_step2, num_threads, dedupe_cols=("name",))
 
 	log(f"All outputs stored in: {run_dir}\n")
 

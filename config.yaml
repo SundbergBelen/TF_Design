@@ -1,17 +1,18 @@
 inputs:
   input_folder: /ifs/share/TF_Project/Design/TF_project_design_step/GalS/Design_input
-  directory_name: /ifs/share/TF_Project/Design/movemap_test/5.0_movemap_local_segments
-  run_name: test
+  directory_name: /ifs/scratch/home/bs3281/TF_Project_BS/GalS_backrub_test
+  run_name: br_1000_06
   residues_to_mutate: [275, 276, 277, 278, 279, 280, 281]
 
 options:
-  n_struct_backrub: 2
-  n_trials_backrub: 200
+  n_struct_backrub: 5
+  n_trials_backrub: 1000
+  mc_kt: 0.6
   use_protein_mpnn: true
   use_rosetta_design: false
   use_relaxed_input: true
   use_backrub: true
-  bias_flag: false
+  bias_jsonl: "" #if wanna use AA bias for mpnn put the path to the bias jsonl
   tied_flag: true
   n_trials: 3
   n_pass: 2

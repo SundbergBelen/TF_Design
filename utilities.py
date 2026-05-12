@@ -1,6 +1,7 @@
 import os
 import pyrosetta
 import inspect
+from datetime import datetime
 
 DEBUG = False
 
@@ -18,10 +19,11 @@ def log(msg, level="INFO", thread=None, indent=0):
 	frame = inspect.currentframe().f_back
 	func_name = frame.f_code.co_name
 
+	timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 	thread_str = f"[ THREAD {thread} ]" if thread is not None else ""
 	indent_str = "    " * indent  # 4 spaces per level
 
-	print(f"[{level}]{thread_str}[{func_name}] {indent_str}{msg}", flush=True)
+	print(f"[{timestamp}][{level}]{thread_str}[{func_name}] {indent_str}{msg}", flush=True)
 
 def move_files(start_folder: os.path, destination_folder: os.path) -> None:
     """

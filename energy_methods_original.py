@@ -42,7 +42,7 @@ def design_round_for_WT(
 	thread_num: int = 0,
 	n_trials: int = 8,
 	n_pass: int = 4,
-	bias_flag: bool = True,
+	bias_jsonl: str = None,
 	tied_flag: bool = False,
 	chain_res_design_dict: dict = None,
 	temp_dir_mpnn: str = None,
@@ -60,7 +60,7 @@ def design_round_for_WT(
 	@param design_flag: bool, Rosetta Design on or off
 	@param relaxed_flag: bool, are the inputs relax?
 	@param thread_num: if multithreading, send thread number
-	@param bias_flag: if True uses bias for sampling
+	@param bias_jsonl: string of path to bias jsonl for mpnn
 	@param tied_flag: if True, ties positions for homooligomer design
 	@param chain_res_design_dict: dictionary including residues to design for each chain
 
@@ -169,7 +169,7 @@ def design_round_for_WT(
 					thread_num,
 					n_trials,
 					n_pass,
-					bias_flag,
+					bias_jsonl,
 					tied_flag,
 					temp_dir=temp_dir_mpnn,
 				)
@@ -336,22 +336,31 @@ def get_dgDSASA_keys() -> list:
 	"""
 	dgDSASA = []
 	if not dgDSASA:
-		dgDSASA = ['name',
-					'separated_interface',
-					'complex_interface_sum',
-					'dSASA',
-					'complex_interface/dSASA',
-					'complex_interface/dSASAx100',
-					'separated_interface/dSASA',
-					'separated_interface/dSASAx100',
-					'cross_hbond',
-					'hbond_energy/separated_interface',
-					'unsat_hbond',
-					'contact_molecular_surface',
-					'pairwise_interface_energy',
-					'positive_pairwise_interface_energy_sum',
-					'pairwise_energies',
-					]
+		dgDSASA = [
+				"name",
+				"separated_interface",
+				"complex_interface_sum",
+				"dSASA",
+				"complex_interface/dSASA",
+				"complex_interface/dSASAx100",
+				"separated_interface/dSASA",
+				"separated_interface/dSASAx100",
+				"cross_hbond",
+				"hbond_energy/separated_interface",
+				"unsat_hbond",
+				"contact_molecular_surface",
+				"pairwise_interface_energy",
+				"positive_pairwise_energy_sum",
+				"pairwise_energies",
+				"unfavorable_pairwise_energy_sum",
+				"helix_energy",
+				"helix_energy_by_chain",
+				"helix_resnums",
+				"pairwise_helix_interface_energy",
+				"positive_pairwise_helix_interface_energy_sum",
+				"pairwise_helix_interface_energies",
+				"path",
+			]
 	return dgDSASA
 
 
@@ -835,12 +844,18 @@ def perform_chainA_backrub(
 	return final
 
 #USE THIS BC OTHERWISE BACKRUB DOESN'T DO ENOUGH... (IF ONLY USING MOVER). THIS DOES THE SAME AS THE C++
+# USE THIS BC OTHERWISE BACKRUB DOESN'T DO ENOUGH... (IF ONLY USING MOVER).
+# THIS DOES THE SAME AS THE C++
 def perform_chainA_backrub_protocol(
 	pdb_list,
 	backrub_output,
 	n_struct_backrub=2,
 	chain_res_design_dict={},
+	min_rmsd_for_last=0.10,
+	max_delta_for_last=100.0,
 ):
+	import os
+	import shutil
 	from pyrosetta.rosetta.protocols.backrub import BackrubProtocol
 	from pyrosetta.rosetta.utility import vector1_unsigned_long
 
@@ -848,13 +863,14 @@ def perform_chainA_backrub_protocol(
 	make_dir(backrub_output)
 
 	final = []
-	score_rows = []
 	scorefxn = pyrosetta.get_fa_scorefxn()
 
 	for pdb_path in pdb_list:
 		file = os.path.basename(pdb_path)[:-4]
 		working_pose = pyrosetta.pose_from_file(pdb_path)
 		info = working_pose.pdb_info()
+
+		score_rows = []
 
 		# Build pivot residue list exactly like your app command:
 		# 275-281 and matching chain-B pose residues 620-626
@@ -869,16 +885,19 @@ def perform_chainA_backrub_protocol(
 		pivot_resnums = sorted(set(pivot_resnums))
 		log(f"BackrubProtocol pivot residues: {pivot_resnums}")
 
-		# For RMSD tracking
 		backrub_movable_resnums = pivot_resnums
 
 		input_score = scorefxn(working_pose)
+
 		score_rows.append({
 			"structure_type": "input",
 			"trajectory": -1,
 			"pdb_path": file,
 			"score": input_score,
+			"delta_score": 0.0,
+			"delta_vs_protocol_start": 0.0,
 			"rmsd": 0.0,
+			"selected_for_design": False,
 		})
 
 		for i in range(n_struct_backrub):
@@ -886,9 +905,7 @@ def perform_chainA_backrub_protocol(
 			pose0 = working_pose.clone()
 
 			score_original_input = scorefxn(pose0)
-			# Optional: score before protocol apply
 			score_before_protocol = scorefxn(pose_copy)
-
 
 			pivot_vec = vector1_unsigned_long()
 			for r in pivot_resnums:
@@ -897,11 +914,6 @@ def perform_chainA_backrub_protocol(
 			br_protocol = BackrubProtocol()
 			br_protocol.set_scorefunction(scorefxn)
 			br_protocol.set_pivot_residues(pivot_vec)
-
-			# This asks protocol to dump _last and _low intermediate structures
-			# using its internal behavior.
-			# br_protocol.set_dump_poses(True)
-
 
 			log(f"Score before BackrubProtocol apply: {score_before_protocol:.3f}")
 			log(f"Applying BackrubProtocol trajectory {i}")
@@ -932,8 +944,7 @@ def perform_chainA_backrub_protocol(
 				if os.path.exists(p):
 					os.remove(p)
 
-			# BackrubProtocol usually leaves pose_copy as the low pose.
-			# Still move the internally dumped files when available.
+			# Move/dump LOW
 			if internal_low_file is not None:
 				shutil.move(
 					os.path.join(protocol_tmp_dir, internal_low_file),
@@ -942,6 +953,7 @@ def perform_chainA_backrub_protocol(
 			else:
 				pose_copy.dump_pdb(low_path)
 
+			# Move LAST, if protocol dumped it
 			if internal_last_file is not None:
 				shutil.move(
 					os.path.join(protocol_tmp_dir, internal_last_file),
@@ -951,11 +963,9 @@ def perform_chainA_backrub_protocol(
 				log(f"No internal last pose found for trajectory {i}", level=" WARNING ")
 
 			log(f"Dumped BackrubProtocol low output {i} to {low_path}")
-			final.append(low_path)
 
 			if os.path.exists(last_path):
 				log(f"Dumped BackrubProtocol last output {i} to {last_path}")
-				final.append(last_path)
 			else:
 				log(f"No BackrubProtocol last output written for trajectory {i}", level=" WARNING ")
 
@@ -964,41 +974,107 @@ def perform_chainA_backrub_protocol(
 			except OSError:
 				pass
 
-
-			out_score = scorefxn(pose_copy)
-
-			delta_vs_original_input = out_score - score_original_input
-			delta_vs_protocol_start = out_score - score_before_protocol
-			
-			out_rmsd = ca_rmsd_for_residue_list(
+			# --------------------------------------------------
+			# Score LOW
+			# --------------------------------------------------
+			low_pose = pyrosetta.pose_from_file(low_path)
+			low_score = scorefxn(low_pose)
+			low_delta = low_score - score_original_input
+			low_delta_vs_protocol_start = low_score - score_before_protocol
+			low_rmsd = ca_rmsd_for_residue_list(
 				pose0,
-				pose_copy,
+				low_pose,
 				backrub_movable_resnums,
 			)
 
+			# --------------------------------------------------
+			# Score LAST, if present
+			# --------------------------------------------------
+			last_score = None
+			last_delta = None
+			last_delta_vs_protocol_start = None
+			last_rmsd = None
+
+			if os.path.exists(last_path):
+				last_pose = pyrosetta.pose_from_file(last_path)
+				last_score = scorefxn(last_pose)
+				last_delta = last_score - score_original_input
+				last_delta_vs_protocol_start = last_score - score_before_protocol
+				last_rmsd = ca_rmsd_for_residue_list(
+					pose0,
+					last_pose,
+					backrub_movable_resnums,
+				)
+
+			# --------------------------------------------------
+			# Choose what goes forward to design
+			# Prefer LAST for diversity if it exists.
+			# Fall back to LOW only if LAST was not written.
+			# --------------------------------------------------
+			use_last = os.path.exists(last_path)
+
+			if use_last:
+				selected_path = last_path
+				selected_type = "backrub_protocol_last"
+				final.append(last_path)
+
+				if last_delta is not None and last_delta > max_delta_for_last:
+					log(
+						f"Using LAST for design despite high delta: {last_path} "
+						f"(RMSD={last_rmsd:.3f} Å, delta={last_delta:.3f}; "
+						f"suggested max delta <= {max_delta_for_last})",
+						level=" WARNING "
+					)
+				else:
+					log(
+						f"Using LAST for design: {last_path} "
+						f"(RMSD={last_rmsd:.3f} Å, delta={last_delta:.3f})"
+					)
+
+			else:
+				selected_path = low_path
+				selected_type = "backrub_protocol_low"
+				final.append(low_path)
+				log(f"Using LOW for design: {low_path}. No LAST pose was found.", level=" WARNING ")
+
 			log(
-				f"BackrubProtocol output {i}: "
-				f"score={out_score:.3f}, "
-				f"delta_vs_original_input={delta_vs_original_input:.3f}, "
-				f"delta_vs_protocol_start={delta_vs_protocol_start:.3f}, "
-				f"region RMSD={out_rmsd:.3f} Å"
+				f"BackrubProtocol trajectory {i}: "
+				f"low_score={low_score:.3f}, low_delta={low_delta:.3f}, low_rmsd={low_rmsd:.3f} Å"
 			)
 
 			score_rows.append({
 				"structure_type": "backrub_protocol_low",
 				"trajectory": i,
-				"score": out_score,
-				"delta_score": delta_vs_original_input,
-				"delta_vs_protocol_start": delta_vs_protocol_start,
-				"rmsd": out_rmsd,
+				"score": low_score,
+				"delta_score": low_delta,
+				"delta_vs_protocol_start": low_delta_vs_protocol_start,
+				"rmsd": low_rmsd,
 				"pdb_path": low_path,
+				"selected_for_design": selected_type == "backrub_protocol_low",
 			})
+
+			if os.path.exists(last_path):
+				log(
+					f"BackrubProtocol trajectory {i}: "
+					f"last_score={last_score:.3f}, last_delta={last_delta:.3f}, "
+					f"last_rmsd={last_rmsd:.3f} Å"
+				)
+
+				score_rows.append({
+					"structure_type": "backrub_protocol_last",
+					"trajectory": i,
+					"score": last_score,
+					"delta_score": last_delta,
+					"delta_vs_protocol_start": last_delta_vs_protocol_start,
+					"rmsd": last_rmsd,
+					"pdb_path": last_path,
+					"selected_for_design": selected_type == "backrub_protocol_last",
+				})
 
 		csv_path = os.path.join(backrub_output, f"{file}_backrub_protocol_scores.csv")
 		write_backrub_score_csv(csv_path, score_rows)
 
 	return final
-
 
 def pre_relax_input(pose: pyrosetta.Pose, iterations: int = 5, constraints: bool = True):
 
@@ -1028,19 +1104,17 @@ def pre_relax_input(pose: pyrosetta.Pose, iterations: int = 5, constraints: bool
 
 	return pose
 
-
-
 def write_backrub_score_csv(csv_path, rows):
-	"""
-	Write score summary for backrub structures.
-	
-	rows = list of dicts with keys:
-		structure_type
-		trajectory
-		pdb_path
-		score
-	"""
-	fieldnames = ["structure_type", "trajectory",  "score", "delta_score", "delta_vs_protocol_start", "rmsd", "pdb_path",]
+	fieldnames = [
+		"structure_type",
+		"trajectory",
+		"score",
+		"delta_score",
+		"delta_vs_protocol_start",
+		"rmsd",
+		"selected_for_design",
+		"pdb_path",
+	]
 
 	with open(csv_path, "w", newline="") as f:
 		writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1048,7 +1122,6 @@ def write_backrub_score_csv(csv_path, rows):
 		writer.writerows(rows)
 
 	log(f"Wrote score summary CSV: {csv_path}")
-
 
 
 def mut_sequence(new_sequence: str, pose: pyrosetta.rosetta.core.pose.Pose, chain_number: int
@@ -1155,77 +1228,213 @@ def compute_pairwise_interface_energy(pose, face1: list, face2: list, output_csv
 		'total_energy': total_energy,
 		'positive_energy_sum': positive_energy_sum
 	}
-
-def get_dgDSASA_dict(binder: str, current_dict=None)-> dict:
+def get_design_helix_pose_resnums(pose, chain_res_design_dict):
 	"""
-	Uses the InterfaceAnalyzerMover from Rosetta to calculate the separated_interface, complex_interface_sum, dSASA, and
-	combined terms. It uses a pdb file  and it returns a dictionary with score terms.
+	Convert chain-local/PDB residue numbers from chain_res_design_dict
+	into pose residue numbers.
 
-	@param binder: path to pdb_file
-	@param current_dict: dict, if you already have dictionary, it adds scoring terms, and if not, returns a dictionary
-			with only the scores
-	@return: dictionary with added score terms.
+	Example:
+		{"A": [275, 276], "B": [275, 276]}
+	might become:
+		{"A": [275, 276], "B": [620, 621]}
+	"""
+	info = pose.pdb_info()
+	pose_res_by_chain = {}
+
+	for chain_id, res_list in chain_res_design_dict.items():
+		pose_res_by_chain[chain_id] = []
+
+		for res in res_list:
+			pose_res = info.pdb2pose(chain_id, res)
+
+			if pose_res == 0:
+				log(
+					f"Could not map chain {chain_id} residue {res} to pose numbering",
+					level=" WARNING "
+				)
+				continue
+
+			pose_res_by_chain[chain_id].append(pose_res)
+
+	return pose_res_by_chain
+
+
+def compute_design_helix_energy(pose, chain_res_design_dict):
+	"""
+	Calculate total per-residue Rosetta energy of the designed helices.
+
+	This is NOT pairwise interface energy.
+	It sums pose.energies().residue_total_energy(r) over the designed helix residues.
+	"""
+	score_fxn = pyrosetta.get_fa_scorefxn()
+	score_fxn(pose)
+
+	pose_res_by_chain = get_design_helix_pose_resnums(
+		pose,
+		chain_res_design_dict
+	)
+
+	all_helix_resnums = sorted({
+		r
+		for resnums in pose_res_by_chain.values()
+		for r in resnums
+	})
+
+	helix_energy = sum(
+		pose.energies().residue_total_energy(r)
+		for r in all_helix_resnums
+	)
+
+	helix_energy_by_chain = {}
+
+	for chain_id, resnums in pose_res_by_chain.items():
+		helix_energy_by_chain[chain_id] = sum(
+			pose.energies().residue_total_energy(r)
+			for r in resnums
+		)
+
+	return {
+		"helix_energy": helix_energy,
+		"helix_energy_by_chain": helix_energy_by_chain,
+		"helix_resnums": all_helix_resnums,
+		"helix_resnums_by_chain": pose_res_by_chain,
+	}
+
+def get_dgDSASA_dict(binder: str, current_dict=None, chain_res_design_dict=None) -> dict:
+	"""
+	Uses the InterfaceAnalyzerMover from Rosetta to calculate interface metrics.
+	Also optionally calculates designed-helix energy and pairwise designed-helix interface energy.
 	"""
 	working_pose = pyrosetta.pose_from_pdb(binder)
+
 	if current_dict is None:
 		current_dict = {}
+
+	# Defaults so CSV columns are always present
+	current_dict.setdefault("helix_energy", 0.0)
+	current_dict.setdefault("helix_energy_by_chain", {})
+	current_dict.setdefault("helix_resnums", [])
+	current_dict.setdefault("pairwise_helix_interface_energy", 0.0)
+	current_dict.setdefault("positive_pairwise_helix_interface_energy_sum", 0.0)
+	current_dict.setdefault("pairwise_helix_interface_energies", [])
+
 	try:
 		contact_mol_surf = calculate_contact_surface(working_pose)
 
 		interface_analyzer = pyrosetta.rosetta.protocols.analysis.InterfaceAnalyzerMover()
-		interface_analyzer.set_pack_separated(True) #this line is necessary to properly calculate separated_interface
+		interface_analyzer.set_pack_separated(True)
 		interface_analyzer.apply(working_pose)
 		all_data = interface_analyzer.get_all_data()
 
 		face_A_list, face_B_list = get_interface_residues(all_data)
 
-		pairwise_interface_energy, total_energy, positive_energy_sum = compute_pairwise_interface_energy(working_pose, face_A_list, face_B_list).values()
-		log(f'Pose: {binder}, Pairwise total energy: {total_energy}, Positive energy sum: {positive_energy_sum}')
+		pairwise_dict = compute_pairwise_interface_energy(
+			working_pose,
+			face_A_list,
+			face_B_list,
+		)
 
-				# --- NEW: Worst pairwise energies ---
-		# Extract energies only
+		pairwise_interface_energy = pairwise_dict["vectors"]
+		total_energy = pairwise_dict["total_energy"]
+		positive_energy_sum = pairwise_dict["positive_energy_sum"]
+
+		log(
+			f"Pose: {binder}, "
+			f"Pairwise total energy: {total_energy}, "
+			f"Positive energy sum: {positive_energy_sum}"
+		)
+
+		# Worst pairwise energies: most positive / most unfavorable
 		energies = [e[2] for e in pairwise_interface_energy]
-
-		# Sort by most positive (worst first)
 		worst_sorted = sorted(energies, reverse=True)
-
 		worst_k = 5
-		# Take top K worst energies
 		worst_k_vals = worst_sorted[:worst_k]
 
-	
+		# -----------------------------
+		# Standard interface metrics
+		# -----------------------------
+		current_dict["separated_interface"] = (all_data.dG)[1]
+		current_dict["complex_interface_sum"] = all_data.crossterm_interface_energy
+		current_dict["dSASA"] = (all_data.dSASA)[1]
 
-		current_dict['separated_interface'] = (all_data.dG)[1] #getting first term in vector
-		current_dict['complex_interface_sum'] = all_data.crossterm_interface_energy
-		current_dict['dSASA'] = (all_data.dSASA)[1] #getting first term in vector
+		current_dict["complex_interface/dSASA"] = all_data.crossterm_interface_energy_dSASA_ratio
+		current_dict["complex_interface/dSASAx100"] = all_data.crossterm_interface_energy_dSASA_ratio * 100
+		current_dict["separated_interface/dSASA"] = all_data.dG_dSASA_ratio
+		current_dict["separated_interface/dSASAx100"] = all_data.dG_dSASA_ratio * 100
+		current_dict["cross_hbond"] = all_data.interface_hbonds
+		current_dict["hbond_energy/separated_interface"] = all_data.hbond_E_fraction
+		current_dict["unsat_hbond"] = all_data.delta_unsat_hbonds
+		current_dict["contact_molecular_surface"] = contact_mol_surf
 
-		current_dict['complex_interface/dSASA'] = all_data.crossterm_interface_energy_dSASA_ratio
-		current_dict['complex_interface/dSASAx100'] = (all_data.crossterm_interface_energy_dSASA_ratio) * 100
-		current_dict['separated_interface/dSASA'] = all_data.dG_dSASA_ratio
-		current_dict['separated_interface/dSASAx100'] = (all_data.dG_dSASA_ratio) * 100
-		current_dict['cross_hbond'] = all_data.interface_hbonds
-		current_dict['hbond_energy/separated_interface'] = all_data.hbond_E_fraction
-		current_dict['unsat_hbond'] = all_data.delta_unsat_hbonds
-		current_dict['contact_molecular_surface'] = contact_mol_surf
+		# Existing pairwise interface energy data
+		current_dict["pairwise_interface_energy"] = total_energy
+		current_dict["positive_pairwise_energy_sum"] = positive_energy_sum
+		current_dict["pairwise_energies"] = pairwise_interface_energy
+		current_dict["unfavorable_pairwise_energy_sum"] = sum(worst_k_vals)
 
-		# Add pairwise energy data
-		current_dict['pairwise_interface_energy'] = total_energy
-		current_dict['positive_interface_energy_sum'] = positive_energy_sum
-		current_dict['pairwise_energies'] = pairwise_interface_energy  # list of [resiA, resiB, energy]
-		current_dict['unfavorable_pairwise_energy_sum'] = sum(worst_k_vals)
+		# -----------------------------
+		# Designed helix metrics
+		# -----------------------------
+		if chain_res_design_dict is not None:
+			helix_dict = compute_design_helix_energy(
+				working_pose,
+				chain_res_design_dict,
+			)
 
-	except:
-		current_dict['complex_interface/dSASA'] = 0
-		current_dict['complex_interface/dSASAx100'] = 0
-		current_dict['separated_interface/dSASA'] = 0
-		current_dict['separated_interface/dSASAx100'] = 0
-		current_dict['cross_hbond'] = 0
-		current_dict['hbond_energy/separated_interface'] = 0
-		current_dict['unsat_hbond'] = 0
-		current_dict['contact_molecular_surface'] = 0
-		current_dict['pairwise_interface_energy'] = 0
-		current_dict['positive_interface_energy_sum'] = 0
-		current_dict['pairwise_energies'] = []
-	
+			current_dict["helix_energy"] = helix_dict["helix_energy"]
+			current_dict["helix_energy_by_chain"] = helix_dict["helix_energy_by_chain"]
+			current_dict["helix_resnums"] = helix_dict["helix_resnums"]
+
+			helix_res_by_chain = helix_dict["helix_resnums_by_chain"]
+			chain_ids = list(helix_res_by_chain.keys())
+
+			pairwise_helix_interface_energy = 0.0
+			positive_pairwise_helix_interface_energy_sum = 0.0
+			pairwise_helix_interface_energies = []
+
+			if len(chain_ids) >= 2:
+				chain_a = chain_ids[0]
+				chain_b = chain_ids[1]
+
+				helix_pairwise_dict = compute_pairwise_interface_energy(
+					working_pose,
+					helix_res_by_chain[chain_a],
+					helix_res_by_chain[chain_b],
+				)
+
+				pairwise_helix_interface_energy = helix_pairwise_dict["total_energy"]
+				positive_pairwise_helix_interface_energy_sum = helix_pairwise_dict["positive_energy_sum"]
+				pairwise_helix_interface_energies = helix_pairwise_dict["vectors"]
+
+			current_dict["pairwise_helix_interface_energy"] = pairwise_helix_interface_energy
+			current_dict["positive_pairwise_helix_interface_energy_sum"] = positive_pairwise_helix_interface_energy_sum
+			current_dict["pairwise_helix_interface_energies"] = pairwise_helix_interface_energies
+
+	except Exception as e:
+		log(f"get_dgDSASA_dict failed for {binder}: {e}", level=" WARNING ")
+
+		current_dict["separated_interface"] = 0
+		current_dict["complex_interface_sum"] = 0
+		current_dict["dSASA"] = 0
+		current_dict["complex_interface/dSASA"] = 0
+		current_dict["complex_interface/dSASAx100"] = 0
+		current_dict["separated_interface/dSASA"] = 0
+		current_dict["separated_interface/dSASAx100"] = 0
+		current_dict["cross_hbond"] = 0
+		current_dict["hbond_energy/separated_interface"] = 0
+		current_dict["unsat_hbond"] = 0
+		current_dict["contact_molecular_surface"] = 0
+
+		current_dict["pairwise_interface_energy"] = 0
+		current_dict["positive_pairwise_energy_sum"] = 0
+		current_dict["pairwise_energies"] = []
+		current_dict["unfavorable_pairwise_energy_sum"] = 0
+
+		current_dict["helix_energy"] = 0
+		current_dict["helix_energy_by_chain"] = {}
+		current_dict["helix_resnums"] = []
+		current_dict["pairwise_helix_interface_energy"] = 0
+		current_dict["positive_pairwise_helix_interface_energy_sum"] = 0
+		current_dict["pairwise_helix_interface_energies"] = []
+
 	return current_dict
-	

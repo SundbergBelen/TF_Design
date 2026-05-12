@@ -16,8 +16,18 @@ def safe_get_args(get_args_func):
     finally:
         sys.argv = original_argv
 
-def protein_mpnn_maker(pdb_path, chain_path, seq_path, chains_to_design='', mutable_positions='',
-                       number_of_predictions=8, sorting_temperature=".5", bias_flag: bool = True, tied_flag: bool = False) -> str:
+def protein_mpnn_maker(
+	pdb_path,
+	chain_path,
+	seq_path,
+	chains_to_design='',
+	mutable_positions='',
+	number_of_predictions=8,
+	sorting_temperature=".5",
+	bias_jsonl=None,
+	tied_flag: bool = False,
+
+) -> str:
     """
     Function calls helper functions from proteinmpnn_glab_version code to generated required input files and stores them in respective folder.
     It calls protein mpnn with given specifications and returns a list with .fa files containing the output sequences.
@@ -36,7 +46,7 @@ def protein_mpnn_maker(pdb_path, chain_path, seq_path, chains_to_design='', muta
     @param mutable_positions: str, mutable positions chains to design proteinmpnn flag
     @param number_of_predictions: int, number of models to be design
     @param sorting_temperature: float , sorting temperature proteinmpnn flag
-    @param bias_flag: bool, should we use a bias?
+    @param bias_jsonl: str, path to bias jsonl for mpnn
     @param tied_flag: bool, if True, ties positions for homooligomers
     @return: str, path to .fa files containing the proteinmpnn output sequence.
     """
@@ -110,31 +120,35 @@ def protein_mpnn_maker(pdb_path, chain_path, seq_path, chains_to_design='', muta
     setattr(args_run_proteinmpnn, "sampling_temp", sorting_temperature)
     setattr(args_run_proteinmpnn, "num_seq_per_target", number_of_predictions)
     setattr(args_run_proteinmpnn, "out_folder", seq_path)
-    if bias_flag:
-        log("running mpnn with AA bias")
-        bias_aa_path = '/ifs/scratch/home/eca2133/final_part/PARROTS-Pipeline-main/bias_AA.jsonl'
-        setattr(args_run_proteinmpnn, "bias_AA_jsonl", bias_aa_path)
+
+    if bias_jsonl:
+        if not os.path.exists(bias_jsonl):
+            raise FileNotFoundError(f"bias_jsonl does not exist: {bias_jsonl}")
+
+        log(f"running mpnn with AA bias: {bias_jsonl}")
+        setattr(args_run_proteinmpnn, "bias_AA_jsonl", str(bias_jsonl))
     else:
         log("not using AA bias for mpnn")
+
     protein_mpnn_run.main(args_run_proteinmpnn)
     return str(pdb_path.split("/")[-1])[0:-4] + ".fa"
 
 def protein_mpnn_designs(
-    path_to_pdb,
-    chain_path,
-    seq_path,
-    pdb_output_path,
-    chains_to_design='',
-    residue_selector=None,
-    mutable_list=None,
-    relaxed=False,
-    design_flag=False,
-    thread_num=None,
-    n_predictions=8,
-    n_pass=4,
-    bias_flag=True,
-    tied_flag=False,
-    temp_dir=None,              # ⭐⭐⭐ NEW
+	path_to_pdb,
+	chain_path,
+	seq_path,
+	pdb_output_path,
+	chains_to_design='',
+	residue_selector=None,
+	mutable_list=None,
+	relaxed=False,
+	design_flag=False,
+	thread_num=None,
+	n_predictions=8,
+	n_pass=4,
+	bias_jsonl=None,
+	tied_flag=False,
+	temp_dir=None,
 ) -> list:
 
     """
@@ -153,7 +167,7 @@ def protein_mpnn_designs(
     @param thread_num: if multithreading, please send the thread num
     @param n_predictions: how many proteinmpnn predictions should we make and evaulate
     @param n_pass: how many should we pass
-    @param bias_flag: if True uses bias for sampling
+    @param bias_jonsl: str to bias jsonl file
     @param tied_flag: if True, ties positions for homooligomer design
     @return: list of paths to passed models.
     """
@@ -165,8 +179,18 @@ def protein_mpnn_designs(
 
     pose: pyrosetta.rosetta.core.pose.Pose = pyrosetta.pose_from_pdb(path_to_pdb)
     score_fxn: pyrosetta.ScoreFunction = pyrosetta.get_fa_scorefxn()
-    seq_file = protein_mpnn_maker(path_to_pdb, chain_path, seq_path, chains_to_design, mutable_positions,
-                                  n_predictions, sorting_temperature='.5', bias_flag=bias_flag, tied_flag=tied_flag)
+    
+    seq_file = protein_mpnn_maker(
+        path_to_pdb,
+        chain_path,
+        seq_path,
+        chains_to_design,
+        mutable_positions,
+        n_predictions,
+        sorting_temperature='0.5',
+        bias_jsonl=bias_jsonl,
+        tied_flag=tied_flag,
+    )
 
     seq_file_path = os.path.join(seq_path, "seqs", seq_file)
     sequences = get_sequences_from_mpnn(seq_file_path)
